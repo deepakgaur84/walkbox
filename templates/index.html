@@ -15,7 +15,19 @@
   nav button.active { background:#fff; color:var(--brand); }
   main { flex:1; display:flex; min-height:0; }
   #side { width:420px; max-width:45vw; display:flex; flex-direction:column; background:var(--card); border-right:1px solid var(--line); min-height:0; }
-  #map { flex:1; }
+  #mapwrap { flex:1; position:relative; min-width:0; }
+  #map { position:absolute; inset:0; }
+  #livebar { position:absolute; top:10px; left:50%; transform:translateX(-50%); z-index:900; background:#fff; border-radius:20px; padding:6px 14px; font-size:13px; box-shadow:0 1px 6px rgba(0,0,0,.3); display:none; max-width:90%; text-align:center; }
+  #livebar.ok { color:var(--brand); } #livebar.off { color:var(--warn); }
+  #elev { position:absolute; left:12px; right:12px; bottom:22px; z-index:900; background:#fff; border-radius:18px; box-shadow:0 2px 10px rgba(0,0,0,.3); padding:8px 12px 4px; display:none; touch-action:none; }
+  #elev .elx { position:absolute; top:-12px; right:-4px; width:28px; height:28px; line-height:24px; border:0; border-radius:50%; background:#fff; box-shadow:0 1px 5px rgba(0,0,0,.4); font-size:20px; cursor:pointer; color:#444; z-index:2; padding:0; }
+  #elev .cap { font-size:10px; color:var(--mute); }
+  #elev svg { display:block; }
+  .me { width:22px; height:22px; border-radius:50%; background:#1a73e8; border:3px solid #fff; box-shadow:0 0 0 2px rgba(26,115,232,.35), 0 1px 4px rgba(0,0,0,.5); box-sizing:border-box; }
+  .arr { width:18px; height:18px; border-radius:50%; background:#fff; border:2px solid #1b5e20; color:#1b5e20; font-size:9px; line-height:14px; text-align:center; box-sizing:border-box; }
+  .pin { width:20px; height:20px; border-radius:50%; border:3px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.6); box-sizing:border-box; }
+  .pin.start { background:linear-gradient(90deg,#1b5e20 50%,#222 50%); }
+  .pin.end { background:#222; color:#fff; font-size:11px; line-height:14px; text-align:center; }
   .tools { padding:10px; border-bottom:1px solid var(--line); display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   .tools input[type=text], .tools input[type=number], .tools select { padding:7px 9px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
   .tools input[type=text] { flex:1; min-width:120px; }
@@ -55,7 +67,7 @@
   a.dl { background:var(--brand); color:#fff; padding:5px 10px; border-radius:6px; text-decoration:none; white-space:nowrap; }
   button.del { background:none; border:0; color:var(--warn); cursor:pointer; padding:0; }
   .foot { padding:6px 10px; font-size:11px; color:var(--mute); border-top:1px solid var(--line); }
-  @media (max-width:800px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:55vh; } #map { height:45vh; flex:none; } }
+  @media (max-width:800px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:55vh; } #mapwrap { height:45vh; flex:none; } }
 </style>
 </head>
 <body>
@@ -99,7 +111,11 @@
     <div id="list"></div>
     <div class="foot">Route data © OpenStreetMap contributors (ODbL). Check conditions before you walk.</div>
   </section>
-  <div id="map"></div>
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="livebar"></div>
+    <div id="elev"></div>
+  </div>
 </main>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -121,7 +137,7 @@ const $ = id => document.getElementById(id);
 function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 
 function setMode(m) {
-  mode = m; if (typeof stopTracking === 'function') stopTracking(); if (typeof clearRoute === 'function') clearRoute();
+  mode = m; if (typeof clearSelection === 'function') clearSelection(); if (typeof clearRoute === 'function') clearRoute();
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
   $('findTools').style.display = m === 'find' ? '' : 'none';
@@ -273,6 +289,50 @@ function distToRoute(lat, lon, lines) {   // metres from a point to the nearest 
   }
   return best;
 }
+function cumDist(chain) { const c = [0]; for (let i = 1; i < chain.length; i++) c.push(c[i - 1] + havM(chain[i - 1], chain[i])); return c; }
+function bearingDeg(a, b) {
+  const rad = x => x * Math.PI / 180, dl = rad(b[1] - a[1]);
+  const y = Math.sin(dl) * Math.cos(rad(b[0]));
+  const x = Math.cos(rad(a[0])) * Math.sin(rad(b[0])) - Math.sin(rad(a[0])) * Math.cos(rad(b[0])) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+function alongRoute(lat, lon, chain, cum) {   // nearest point on the route: metres along it, and metres off it
+  const kx = Math.cos(lat * Math.PI / 180) * 111320, ky = 110540;
+  let best = {off: Infinity, along: 0};
+  for (let i = 0; i < chain.length - 1; i++) {
+    const ax = (chain[i][1] - lon) * kx, ay = (chain[i][0] - lat) * ky;
+    const bx = (chain[i + 1][1] - lon) * kx, by = (chain[i + 1][0] - lat) * ky;
+    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    let t = len2 ? -(ax * dx + ay * dy) / len2 : 0; t = Math.max(0, Math.min(1, t));
+    const off = Math.hypot(ax + t * dx, ay + t * dy);
+    if (off < best.off) best = {off, along: cum[i] + t * (cum[i + 1] - cum[i])};
+  }
+  return best;
+}
+function pointAt(chain, cum, d) {             // [lat, lon] at d metres along the route
+  const total = cum[cum.length - 1];
+  if (d <= 0) return chain[0]; if (d >= total) return chain[chain.length - 1];
+  let lo = 0, hi = cum.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= d) lo = m; else hi = m; }
+  const t = (d - cum[lo]) / ((cum[hi] - cum[lo]) || 1);
+  return [chain[lo][0] + t * (chain[hi][0] - chain[lo][0]), chain[lo][1] + t * (chain[hi][1] - chain[lo][1])];
+}
+function arrowSpots(chain, cum, count) {      // evenly spaced direction arrows
+  const total = cum[cum.length - 1], out = [];
+  for (let k = 1; k <= count; k++) {
+    const d = total * k / (count + 1), p = pointAt(chain, cum, d), q = pointAt(chain, cum, Math.min(total, d + Math.max(15, total / 200)));
+    out.push({at: p, bearing: bearingDeg(p, q)});
+  }
+  return out;
+}
+function elevAt(p, dKm) {                     // interpolate the profile at a distance in km
+  const d = p.dist_km, e = p.elev_m;
+  if (dKm <= d[0]) return e[0]; if (dKm >= d[d.length - 1]) return e[e.length - 1];
+  let lo = 0, hi = d.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (d[m] <= dKm) lo = m; else hi = m; }
+  const t = (dKm - d[lo]) / ((d[hi] - d[lo]) || 1); return e[lo] + t * (e[hi] - e[lo]);
+}
+function fmtDist(m) { return m < 950 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
 // END NAV
 
 let routeLayer = null;
@@ -309,27 +369,123 @@ function routeToStart(r, out, btn) {
     {enableHighAccuracy: true, timeout: 20000});
 }
 
-let watchId = null, meMarker = null, meCircle = null;
-function stopTracking() {
-  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-  if (meMarker) { map.removeLayer(meMarker); meMarker = null; }
-  if (meCircle) { map.removeLayer(meCircle); meCircle = null; }
+// ---- Selected walk: styled route, live GPS dot and elevation profile ----
+let sel = null;   // the walk currently shown in "navigation view"
+function clearSelection() {
+  if (!sel) return;
+  if (sel.watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(sel.watchId);
+  sel.layers.forEach(l => map.removeLayer(l));
+  if (lines[sel.r.osm_id]) lines[sel.r.osm_id].setStyle({opacity: .8});
+  sel = null;
+  $('elev').style.display = 'none'; $('elev').textContent = ''; $('livebar').style.display = 'none';
 }
-function startTracking(r, out, btn) {
-  if (!navigator.geolocation) { out.textContent = 'Location is not available in this browser.'; return; }
-  stopTracking(); focus(r.osm_id); btn.textContent = 'Stop tracking'; out.textContent = 'Finding your position…';
-  watchId = navigator.geolocation.watchPosition(pos => {
+function drawArrows(s) {   // direction arrows roughly every 90 px, so they stay sparse at any zoom
+  s.arrows.clearLayers();
+  let px = 0;
+  for (let i = 1; i < s.chain.length; i++) px += map.latLngToContainerPoint(s.chain[i]).distanceTo(map.latLngToContainerPoint(s.chain[i - 1]));
+  const count = Math.max(2, Math.min(40, Math.floor(px / 90)));
+  arrowSpots(s.chain, s.cum, count).forEach(a => s.arrows.addLayer(L.marker(a.at, {
+    icon: L.divIcon({className: '', html: '<div class="arr" style="transform:rotate(' + a.bearing.toFixed(0) + 'deg)">▲</div>', iconSize: [18, 18], iconAnchor: [9, 9]}),
+    interactive: false, keyboard: false})));
+}
+map.on('zoomend', () => { if (sel && sel.arrows) drawArrows(sel); });
+function selectWalk(r) {
+  if (sel && sel.r.osm_id === r.osm_id) return;
+  clearSelection();
+  const chain = r.line && r.line[0]; if (!chain || chain.length < 2) return;
+  const s = sel = {r, chain, cum: cumDist(chain), layers: [], watchId: null, me: null, acc: null, hover: null, profile: null, chart: null};
+  if (lines[r.osm_id]) lines[r.osm_id].setStyle({opacity: 0});
+  const add = l => { l.addTo(map); s.layers.push(l); return l; };
+  const icon = (html, size) => L.divIcon({className: '', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2]});
+  const opts = {lineCap: 'round', lineJoin: 'round', interactive: false};
+  const paths = r.line.map(c => add(L.polyline(c, Object.assign({color: '#1b5e20', weight: 11, opacity: 1}, opts))));
+  r.line.forEach(c => add(L.polyline(c, Object.assign({color: '#66bb6a', weight: 7, opacity: 1}, opts))));
+  const total = s.cum[s.cum.length - 1];
+  s.arrows = add(L.layerGroup());
+  add(L.marker(chain[0], {icon: icon('<div class="pin start"></div>', 20), interactive: false, keyboard: false}));
+  add(L.marker(chain[chain.length - 1], {icon: icon('<div class="pin end">⚑</div>', 20), interactive: false, keyboard: false}));
+  map.fitBounds(L.featureGroup(paths).getBounds(), {paddingTopLeft: [40, 50], paddingBottomRight: [40, 150], animate: false});
+  drawArrows(s);
+  loadProfile(s);
+  startLive(s);
+}
+
+async function loadProfile(s) {
+  const el = $('elev'); el.style.display = 'block'; el.textContent = '';
+  const msg = document.createElement('div'); msg.className = 'cap'; msg.style.padding = '10px 0'; msg.textContent = 'Loading elevation profile…'; el.appendChild(msg);
+  try {
+    const resp = await fetch('/api/walks/' + s.r.osm_id + '/profile'); const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(j.error || ('Failed (' + resp.status + ')'));
+    if (sel !== s) return;
+    s.profile = j; drawProfile(s); if (s.along !== undefined && s.along !== null) setProgress(s);
+  } catch (e) { if (sel === s) { msg.textContent = e.message; addClose(el); } }
+}
+function addClose(el) { const x = document.createElement('button'); x.className = 'elx'; x.textContent = '×'; x.title = 'Close'; x.onclick = clearSelection; el.appendChild(x); }
+function drawProfile(s) {
+  const el = $('elev'); el.textContent = ''; addClose(el);
+  const p = s.profile, NS = 'http://www.w3.org/2000/svg';
+  const W = Math.max(240, el.clientWidth - 24), H = 88, padL = 6, padR = 46, padT = 10, padB = 18;
+  const lo = Math.floor(p.min - 2), hi = Math.ceil(p.max + 2);
+  const X = km => padL + (km / p.total_km) * (W - padL - padR);
+  const Y = e => padT + (1 - (e - lo) / ((hi - lo) || 1)) * (H - padT - padB);
+  const svg = document.createElementNS(NS, 'svg'); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  const mk = (tag, attrs, text) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); if (text !== undefined) n.textContent = text; svg.appendChild(n); return n; };
+  const pts = p.dist_km.map((d, i) => X(d).toFixed(1) + ',' + Y(p.elev_m[i]).toFixed(1));
+  mk('polygon', {points: X(0) + ',' + Y(lo) + ' ' + pts.join(' ') + ' ' + X(p.total_km) + ',' + Y(lo), fill: '#eef1ef'});
+  mk('polyline', {points: pts.join(' '), fill: 'none', stroke: '#222', 'stroke-width': 1.6, 'stroke-linejoin': 'round'});
+  mk('text', {x: W - 2, y: padT + 3, 'text-anchor': 'end', 'font-size': 11, fill: '#444'}, Math.round(p.max) + ' m');
+  mk('text', {x: W - 2, y: H - padB, 'text-anchor': 'end', 'font-size': 11, fill: '#444'}, Math.round(p.min) + ' m');
+  [0, .25, .5, .75, 1].forEach(f => mk('text', {x: X(p.total_km * f), y: H - 4, 'text-anchor': f === 0 ? 'start' : (f === 1 ? 'end' : 'middle'), 'font-size': 11, fill: '#444'}, (p.total_km * f).toFixed(1) + ' km'));
+  const vline = mk('line', {x1: 0, x2: 0, y1: padT, y2: H - padB, stroke: '#e8590c', 'stroke-width': 1.5, visibility: 'hidden'});
+  const tip = mk('text', {x: padL, y: padT + 3, 'font-size': 11, fill: '#e8590c', 'font-weight': 600, visibility: 'hidden'}, '');
+  const prog = mk('circle', {r: 6, fill: '#1a73e8', stroke: '#fff', 'stroke-width': 2, visibility: 'hidden'});
+  el.appendChild(svg);
+  const cap = document.createElement('div'); cap.className = 'cap'; cap.textContent = 'Elevation: Open-Meteo (Copernicus DEM), approximate. Touch the chart to see that point on the map.'; el.appendChild(cap);
+  s.chart = {X, Y, vline, tip, prog, W, padL, padR};
+  const total = s.cum[s.cum.length - 1];
+  const move = ev => {
+    const rect = svg.getBoundingClientRect(), x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left;
+    const km = Math.max(0, Math.min(p.total_km, (x - padL) / (W - padL - padR) * p.total_km));
+    vline.setAttribute('x1', X(km)); vline.setAttribute('x2', X(km)); vline.setAttribute('visibility', 'visible');
+    tip.textContent = km.toFixed(1) + ' km · ' + Math.round(elevAt(p, km)) + ' m'; tip.setAttribute('visibility', 'visible');
+    tip.setAttribute('x', Math.min(X(km) + 6, W - padR - 70));
+    const at = pointAt(s.chain, s.cum, km / p.total_km * total);
+    if (!s.hover) { s.hover = L.circleMarker(at, {radius: 7, color: '#fff', weight: 2, fillColor: '#e8590c', fillOpacity: 1, interactive: false}).addTo(map); s.layers.push(s.hover); }
+    else s.hover.setLatLng(at);
+  };
+  const leave = () => { vline.setAttribute('visibility', 'hidden'); tip.setAttribute('visibility', 'hidden'); if (s.hover) { map.removeLayer(s.hover); s.layers = s.layers.filter(l => l !== s.hover); s.hover = null; } };
+  svg.addEventListener('pointermove', move); svg.addEventListener('pointerdown', move); svg.addEventListener('pointerleave', leave); svg.addEventListener('pointerup', ev => { if (ev.pointerType === 'touch') leave(); });
+}
+function setProgress(s) {   // blue dot on the elevation chart at the user's place along the route
+  if (!s.chart || !s.profile || s.along === null) return;
+  const total = s.cum[s.cum.length - 1], km = Math.max(0, Math.min(s.profile.total_km, s.along / total * s.profile.total_km));
+  s.chart.prog.setAttribute('cx', s.chart.X(km)); s.chart.prog.setAttribute('cy', s.chart.Y(elevAt(s.profile, km)));
+  s.chart.prog.setAttribute('visibility', 'visible');
+}
+function startLive(s) {
+  const bar = $('livebar'); bar.style.display = 'block'; bar.className = ''; bar.textContent = 'Finding your position…';
+  s.along = null;
+  if (!navigator.geolocation) { bar.className = 'off'; bar.textContent = 'Live location is not available in this browser.'; return; }
+  s.watchId = navigator.geolocation.watchPosition(pos => {
+    if (sel !== s) return;
     const la = pos.coords.latitude, lo = pos.coords.longitude, acc = pos.coords.accuracy;
-    if (!meMarker) {
-      meMarker = L.circleMarker([la, lo], {radius: 8, color: '#fff', weight: 3, fillColor: '#1a73e8', fillOpacity: 1}).addTo(map);
-      meCircle = L.circle([la, lo], {radius: acc, color: '#1a73e8', weight: 1, fillOpacity: .1}).addTo(map);
-    } else { meMarker.setLatLng([la, lo]); meCircle.setLatLng([la, lo]).setRadius(acc); }
-    const d = distToRoute(la, lo, r.line), toStart = havM([la, lo], r.line[0][0]);
-    const near = d < Math.max(50, acc);
-    out.style.color = near ? 'var(--brand)' : 'var(--warn)';
-    out.textContent = (near ? 'On the route' : 'Off the route') + ' (' + Math.round(d) + ' m from the line). ' +
-      (toStart > 100 ? (toStart / 1000).toFixed(1) + ' km from the start.' : 'At the start.') + ' GPS accuracy about ' + Math.round(acc) + ' m.';
-  }, err => { out.textContent = 'Could not get your position: ' + err.message; btn.textContent = 'Show my position on this route'; },
+    if (!s.me) {
+      s.me = L.marker([la, lo], {icon: L.divIcon({className: '', html: '<div class="me"></div>', iconSize: [22, 22], iconAnchor: [11, 11]}), zIndexOffset: 2000, interactive: false, keyboard: false}).addTo(map);
+      s.acc = L.circle([la, lo], {radius: acc, color: '#1a73e8', weight: 1, fillOpacity: .1, interactive: false}).addTo(map);
+      s.layers.push(s.me, s.acc);
+    } else { s.me.setLatLng([la, lo]); s.acc.setLatLng([la, lo]).setRadius(acc); }
+    const a = alongRoute(la, lo, s.chain, s.cum), total = s.cum[s.cum.length - 1];
+    const near = a.off < Math.max(50, acc);
+    s.along = near ? a.along : null;
+    bar.className = near ? 'ok' : 'off';
+    if (near) {
+      const km = s.profile ? s.profile.total_km : s.r.distance_km, done = km * a.along / total;
+      bar.textContent = 'On the route · ' + done.toFixed(1) + ' km done · ' + Math.max(0, km - done).toFixed(1) + ' km to go';
+    } else {
+      bar.textContent = 'Off the route · ' + fmtDist(a.off) + ' from the nearest point of the line';
+    }
+    if (s.chart) { if (near) setProgress(s); else s.chart.prog.setAttribute('visibility', 'hidden'); }
+  }, err => { if (sel === s) { bar.className = 'off'; bar.textContent = 'Live location is off: ' + err.message; } },
   {enableHighAccuracy: true, maximumAge: 5000, timeout: 20000});
 }
 function makeNav(r) {
@@ -346,10 +502,7 @@ function makeNav(r) {
   add(L_.geo, 'Open in any map app (OsmAnd, etc.)');
   const note = document.createElement('div'); note.className = 'att'; note.style.cssText = 'font-size:11px;color:var(--mute);margin:4px 0';
   note.textContent = 'Google Maps follows its own paths between a few points on the walk, so it is approximate. For the exact track, download the GPX and open it in Organic Maps or OsmAnd (needs the app installed on your phone).';
-  const live = document.createElement('div'); live.className = 'live';
-  const tb = document.createElement('button'); tb.className = 'b alt'; tb.style.cssText = 'padding:4px 10px;font-size:13px'; tb.textContent = 'Show my position on this route';
-  tb.onclick = () => { if (watchId !== null) { stopTracking(); tb.textContent = 'Show my position on this route'; live.textContent = ''; } else startTracking(r, live, tb); };
-  panel.append(note, tb, live);
+  panel.append(note);
   if (ROUTING) {
     const rb = document.createElement('div'); rb.style.marginTop = '8px';
     const out = document.createElement('div'); out.style.fontSize = '13px';
@@ -422,6 +575,7 @@ async function del(id) {
 
 // ---- Rendering ----
 function render() {
+  clearSelection();
   const list = $('list'); list.textContent = '';
   layerGroup.clearLayers(); lines = {};
   const all = [];
@@ -477,6 +631,7 @@ function focus(id) {
   const el = $('w' + id); if (el) { el.classList.add('sel'); el.scrollIntoView({block:'nearest'}); }
   Object.entries(lines).forEach(([k, l]) => l.setStyle({weight: k == id ? 7 : 4}));
   if (lines[id]) { lines[id].bringToFront(); map.fitBounds(lines[id].getBounds(), {padding:[30,30]}); }
+  const r = results.find(x => x.osm_id == id); if (r) selectWalk(r);
 }
 
 // ---- Start at the current location; fall back to Auckland CBD ----

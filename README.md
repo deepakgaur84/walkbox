@@ -15,6 +15,19 @@ Pick any combination when you search:
 - **Official routes**: named walking route relations in OpenStreetMap. ODbL.
 - **Named paths**: named footpaths in OpenStreetMap, grouped by name into one walk (paths shorter than `MIN_PATH_KM` are ignored). ODbL.
 
+## Walk view: route, live GPS and elevation profile
+
+Click any walk in the list and the map switches to a navigation-style view:
+
+- the route is drawn as a thick green line with direction arrows, a start marker and an end flag;
+- a **live blue dot** follows your GPS position, with a bar at the top saying whether you are on the route, how many km you have done and how many are left
+  (or how far you are from the line when you are off it). Your browser asks for location permission the first time, and the page needs the https address;
+- an **elevation profile** runs along the bottom with a blue dot at your position along the route. Touch or hover the chart to see the distance and height at
+  that point, and the same spot is shown on the map. Heights come from the free Open-Meteo elevation service (approximate) and are saved after the first lookup;
+- the × button closes the view and stops the GPS.
+
+The page must stay open with the screen on for the live dot to update; browsers pause web pages in the background.
+
 ## Navigating to and along a walk
 
 Every walk card has a **Navigate** button:
@@ -24,10 +37,6 @@ Every walk card has a **Navigate** button:
   finds its own paths between those points, so this is an approximation, not the exact track.
 - **Show start / Walking route in Organic Maps** open the free offline Organic Maps app on your phone (it must be installed) using its `om://` links. Its route is its own pedestrian route from the start to the end of the walk.
 - **Open in any map app** uses a `geo:` link for apps such as OsmAnd (Android).
-- **Show my position on this route** shows a blue dot on the Walkbox map and tells you whether you are on the route, how far off it
-  you are, and how far you are from the start. It uses your browser's location, so it needs the https address and location permission,
-  and the page must stay open. It does not give turn-by-turn spoken directions.
-
 - **Turn-by-turn to the start** and **Turn-by-turn along this walk** (inside Walkbox, no phone app needed) use a self-hosted
   [Valhalla](https://github.com/valhalla/valhalla) routing engine that runs as the `walkbox-valhalla` container in the same stack.
   It covers **New Zealand only** (change `tile_urls` to another [Geofabrik](https://download.geofabrik.de/) extract to cover another region).

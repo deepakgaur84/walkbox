@@ -386,6 +386,40 @@ assert c.get("/api/route/status").get_json() == {"enabled": False, "ready": Fals
 assert b"const ROUTING = false" in c.get("/").data
 wb.VALHALLA_URL = "http://valhalla:8002"
 
+# --- Elevation profile for the map view
+ecalls = []
+orig_get = wb.requests.get
+def counting_get(url, **kw):
+    if "open-meteo" in url or "elevation" in url:
+        ecalls.append(len(kw["params"]["latitude"].split(",")))
+    return orig_get(url, **kw)
+wb.requests.get = counting_get
+pr = c.get("/api/walks/%d/profile" % nz_id)
+pj = pr.get_json()
+assert pr.status_code == 200, pj
+assert len(pj["dist_km"]) == len(pj["elev_m"]) >= 2 and pj["dist_km"][0] == 0 and abs(pj["dist_km"][-1] - pj["total_km"]) < 0.01
+assert pj["total_km"] > 1.0 and pj["min"] <= pj["max"] and all(b >= a for a, b in zip(pj["dist_km"], pj["dist_km"][1:]))
+first_calls = len(ecalls)
+assert first_calls >= 1 and all(n <= 100 for n in ecalls)                      # batches of at most 100 points
+assert c.get("/api/walks/%d/profile" % nz_id).get_json() == pj and len(ecalls) == first_calls   # cached in the database
+assert c.get("/api/walks/999999/profile").status_code == 404
+# a walk that is only in the recent search results (not in the box) also works, and is not stored
+res2 = c.post("/api/search", json=body).get_json()["results"]
+rocky = next(x for x in res2 if x["name"] == "Rocky Headland Track")
+assert c.get("/api/walks/%d/profile" % rocky["osm_id"]).status_code == 200
+assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT COUNT(*) FROM walks WHERE osm_id=?", (rocky["osm_id"],)).fetchone()[0] == 0
+# elevation outage -> clear error, nothing cached
+wb._rate_calls.clear()
+other = [x for x in res2 if x["source"] == "osm-route"][0]
+wb.requests.get = down
+r500 = c.get("/api/walks/%d/profile" % other["osm_id"])
+assert r500.status_code == 502 and "Elevation profile unavailable" in r500.get_json()["error"]
+wb.requests.get = orig_get
+pts, tot = wb.sample_profile([(0, 0), (0, 0.01), (0.01, 0.01)], n=11)
+assert len(pts) == 11 and abs(pts[0][2]) < 1e-9 and abs(pts[-1][2] - tot) < 1e-6 and abs(pts[5][0]) < 1e-6 and abs(pts[5][1] - 0.01) < 1e-3
+page = c.get("/").data
+assert b'id="elev"' in page and b'id="livebar"' in page and b"selectWalk" in page
+
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data

@@ -119,7 +119,7 @@ CREATE INDEX IF NOT EXISTS walks_name ON walks(name);
 EXTRA_COLUMNS = {
     "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
     "link": "TEXT", "region": "TEXT", "time_text": "TEXT",
-    "my_rating": "INTEGER", "my_note": "TEXT",
+    "my_rating": "INTEGER", "my_note": "TEXT", "profile": "TEXT",
 }
 
 
@@ -963,6 +963,79 @@ def api_photos(osm_id):
         return jsonify(photos=commons_photos(chain))
     except RuntimeError as ex:
         return jsonify(error="Photo service problem: %s" % ex), 502
+
+
+def sample_profile(chain, n=160):
+    """Evenly spaced points along a route, with their distance (m) from the start."""
+    cum = [0.0]
+    for i in range(1, len(chain)):
+        cum.append(cum[-1] + haversine_m(chain[i - 1], chain[i]))
+    total = cum[-1]
+    if total <= 0:
+        raise RuntimeError("This walk has no length.")
+    n = max(2, min(n, int(total / 10) + 2))
+    pts, j = [], 0
+    for k in range(n):
+        d = total * k / (n - 1)
+        while j < len(cum) - 2 and cum[j + 1] < d:
+            j += 1
+        seg = (cum[j + 1] - cum[j]) or 1.0
+        t = min(1.0, max(0.0, (d - cum[j]) / seg))
+        pts.append((chain[j][0] + t * (chain[j + 1][0] - chain[j][0]),
+                    chain[j][1] + t * (chain[j + 1][1] - chain[j][1]), d))
+    return pts, total
+
+
+def fetch_elevations(pts):
+    elev = []
+    for i in range(0, len(pts), 100):
+        batch = pts[i:i + 100]
+        try:
+            r = requests.get(
+                ELEVATION_URL,
+                params={"latitude": ",".join("%.5f" % p[0] for p in batch),
+                        "longitude": ",".join("%.5f" % p[1] for p in batch)},
+                headers={"User-Agent": USER_AGENT}, timeout=20)
+            got = r.json().get("elevation") if r.status_code == 200 else None
+        except (requests.RequestException, ValueError) as ex:
+            raise RuntimeError(_short_error(ELEVATION_URL, ex))
+        if not got or len(got) != len(batch) or any(e is None for e in got):
+            raise RuntimeError("The elevation service did not return data.")
+        elev += got
+    return elev
+
+
+def build_profile(chain):
+    pts, total = sample_profile(chain)
+    elev = fetch_elevations(pts)
+    return {"total_km": round(total / 1000.0, 3), "dist_km": [round(p[2] / 1000.0, 3) for p in pts],
+            "elev_m": [round(e, 1) for e in elev], "min": round(min(elev), 1), "max": round(max(elev), 1)}
+
+
+@app.get("/api/walks/<int:osm_id>/profile")
+def api_profile(osm_id):
+    row = db().execute("SELECT geom, profile FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
+    if row and row["profile"]:
+        return jsonify(json.loads(row["profile"]))
+    if row:
+        chain = json.loads(row["geom"])[0]
+    else:
+        with _cache_lock:
+            wk = _cache.get(osm_id)
+        if not wk:
+            abort(404)
+        chain = wk["chains"][0]
+    if not rate_ok("profile", 60):
+        return jsonify(error="Too many elevation lookups just now. Try again in a minute."), 429
+    try:
+        prof = build_profile(chain)
+    except RuntimeError as ex:
+        return jsonify(error="Elevation profile unavailable: %s" % ex), 502
+    if row:
+        conn = db()
+        conn.execute("UPDATE walks SET profile=? WHERE osm_id=?", (json.dumps(prof), osm_id))
+        conn.commit()
+    return jsonify(prof)
 
 
 @app.put("/api/walks/<int:osm_id>/note")
