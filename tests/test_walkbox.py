@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
 os.environ["VALHALLA_URL"] = "http://valhalla:8002"
+os.environ["SEARCH_CACHE_SECONDS"] = "0"   # the search cache is switched on explicitly in its own test
 import app as wb  # noqa: E402
 
 
@@ -194,6 +195,10 @@ by_name = {x["name"]: x for x in res}
 assert all("line" not in x for x in res), "search must not return route geometry"
 oq = [x for x in calls if x.startswith("overpass:")][-1]
 assert "out tags bb" in oq and "out tags geom" not in oq and "->.r;" in oq and "->.p;" in oq
+assert "[bbox:-36.900000,174.700000,-36.700000,174.900000]" in oq                       # one global bbox
+assert '["route"="hiking"]' in oq and '["highway"="footway"]' in oq                      # exact matches, not regular expressions
+assert '"highway"~' not in oq and '["route"~' not in oq
+assert isinstance(r.get_json()["ms"], int)
 assert all(p.get("returnGeometry") == "false" for u, p in get_log if "arcgis" in u or "b5ADKIcWivL5vNaV" in u)
 
 assert "Test Loop & Ridge" in by_name and "Test Kauri Track" in by_name and "Takapuna Beach Walkway" in by_name, list(by_name)
@@ -233,6 +238,20 @@ j = c.post("/api/search", json=body).get_json()
 assert j["warnings"] and any(x["source"] == "doc" for x in j["results"]) and not any(x["source"] == "osm-route" for x in j["results"])
 wb.overpass = fake_overpass
 c.post("/api/search", json=body)      # refill the cache
+
+# --- repeated searches of the same area are served from a short-lived cache
+wb.SEARCH_TTL = 900; wb._search_cache.clear()
+ov = lambda: sum(1 for x in calls if x.startswith("overpass:") and "out tags bb" in x)
+c.post("/api/search", json=body); n_ov = ov()
+again = c.post("/api/search", json=body).get_json()
+assert ov() == n_ov and len(again["results"]) == len(res)                                 # no new Overpass query
+assert all("line" not in x for x in again["results"])
+wb.overpass = boom; wb._search_cache.clear()
+assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 502      # a failed search is reported...
+wb.overpass = fake_overpass
+assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 200      # ...and never cached
+wb.SEARCH_TTL = 0; wb._search_cache.clear()
+c.post("/api/search", json=body)
 
 # --- detail on click: each source loads its own route, keeping the list's id
 calls.clear()

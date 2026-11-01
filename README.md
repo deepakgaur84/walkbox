@@ -21,6 +21,12 @@ Pick any combination when you search:
 source gives one. No route outlines are downloaded at this stage, so it is quick. Lengths of OpenStreetMap named paths are rough (shown with a ~) and
 official OpenStreetMap routes show no length until opened.
 
+Each source is searched as its **own request**, and the page shows a source's walks the moment it answers: DOC and the council tracks usually come back
+in a second or two, while OpenStreetMap (routes and named paths) is the slowest because it runs on shared public servers. You can open a walk
+while the rest are still loading. The status line shows which sources are done and how long each took. Repeated searches of the same area are
+remembered for 15 minutes (`SEARCH_CACHE_SECONDS`). If OpenStreetMap is slow for you, untick "Official routes" or "Named paths", or list a faster
+Overpass server first in `OVERPASS_URLS`.
+
 The route itself is fetched only when you **click a walk** (or when you add it to your box). After that the walk view opens, with its exact length.
 
 ## Weather and nearby places
@@ -110,6 +116,7 @@ To update after code changes: push to `main`, wait for the green tick on the Act
 | PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |
 | VALHALLA_URL | (blank) | Address of the Valhalla routing engine; blank hides the turn-by-turn buttons. |
 | WEATHER_URL | Open-Meteo forecast API | Weather service used by the weather card. |
+| SEARCH_CACHE_SECONDS | 900 | How long a finished search of the same area is remembered. |
 | MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
 | MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
 | MIN_PATH_KM | 0.8 | Shortest named path (grouped by name) listed as a walk. |

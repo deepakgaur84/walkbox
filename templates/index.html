@@ -191,6 +191,19 @@ $('place').addEventListener('keydown', e => { if (e.key === 'Enter') goPlace(); 
 
 // ---- Find ----
 let searchCtl = null, searchSeq = 0;
+const SOURCE_ORDER = ['doc', 'nz-track', 'osm-route', 'osm-path'];
+function mergeResults(bySource) {   // keep routes already loaded, drop duplicates of the same name from less curated sources
+  const old = new Map(results.map(r => [r.osm_id, r]));
+  const out = [];
+  Object.values(bySource).forEach(list => list.forEach(r => out.push(old.get(r.osm_id) || r)));
+  const names = src => new Set(out.filter(r => r.source === src).map(r => r.name.toLowerCase()));
+  const doc = names('doc');
+  let merged = out.filter(r => !(r.source === 'nz-track' && doc.has(r.name.toLowerCase())));
+  const cur = new Set(merged.filter(r => r.source === 'doc' || r.source === 'nz-track').map(r => r.name.toLowerCase()));
+  merged = merged.filter(r => !(r.source === 'osm-path' && cur.has(r.name.toLowerCase())));
+  merged.sort((a, b) => (SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source)) || ((b.distance_km || 0) - (a.distance_km || 0)));
+  return merged;
+}
 async function runSearch() {
   const b = map.getBounds();
   if ((b.getNorth() - b.getSouth()) > MAX_SPAN || (b.getEast() - b.getWest()) > MAX_SPAN) {
@@ -198,27 +211,35 @@ async function runSearch() {
   }
   if (searchCtl) searchCtl.abort();          // a new search replaces the one in progress
   searchCtl = new AbortController();
-  const mine = ++searchSeq, btn = $('searchBtn');
-  btn.textContent = 'Searching… (press again to restart)'; status('Searching all sources. This can take up to a minute…');
-  try {
-    const sources = [];
-    if ($('srcDoc').checked) sources.push('doc');
-    if ($('srcNz').checked) sources.push('nz');
-    if ($('srcRoutes').checked) sources.push('routes');
-    if ($('srcPaths').checked) sources.push('paths');
-    const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources}, searchCtl.signal);
-    if (mine !== searchSeq) return;           // stale reply
-    results = j.results; selected.clear();
-    const warn = j.warnings && j.warnings.length ? ' Note: ' + j.warnings.join(' | ') : '';
-    status((results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '. Click a walk to load its route.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
+  const mine = ++searchSeq, btn = $('searchBtn'), signal = searchCtl.signal;
+  const want = [['doc', 'DOC', 'srcDoc'], ['nz', 'Councils', 'srcNz'], ['routes', 'Routes', 'srcRoutes'], ['paths', 'Paths', 'srcPaths']].filter(x => $(x[2]).checked);
+  if (!want.length) { status('Tick at least one source.', true); return; }
+  btn.textContent = 'Searching… (press again to restart)';
+  results = []; selected.clear(); render();      // a new search starts from an empty list
+  const state = {}, bySource = {}, warnings = [];
+  want.forEach(x => state[x[0]] = '…');
+  const show = done => status((done ? 'Done. ' : 'Searching: ') + want.map(x => x[1] + ' ' + state[x[0]]).join(' · ') + (done ? '' : ' (results appear as each source answers)'));
+  show(false);
+  let capped = false;
+  await Promise.all(want.map(async ([key, label]) => {
+    try {
+      const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources: [key]}, signal);
+      if (mine !== searchSeq) return;
+      bySource[key] = j.results; capped = capped || j.capped; (j.warnings || []).forEach(w => warnings.push(w));
+      state[key] = '✓ ' + j.results.length + (j.ms ? ' (' + (j.ms / 1000).toFixed(1) + ' s)' : '');
+    } catch (e) {
+      if (e.name === 'AbortError' || mine !== searchSeq) return;
+      state[key] = '✗'; warnings.push(label + ': ' + e.message);
+    }
+    if (mine !== searchSeq) return;
+    results = mergeResults(bySource); render(true); show(false);
     $('findActions').style.display = results.length ? '' : 'none';
-    render();
-  } catch (e) {
-    if (e.name === 'AbortError' || mine !== searchSeq) return;
-    status(e.message, true);
-  } finally {
-    if (mine === searchSeq) btn.textContent = 'Find walks in this map view';
-  }
+  }));
+  if (mine !== searchSeq) return;
+  btn.textContent = 'Find walks in this map view';
+  const warn = warnings.length ? ' Note: ' + warnings.join(' | ') : '';
+  show(true);
+  status($('status').textContent + ' ' + (results.length ? results.length + ' walks' + (capped ? ' (list capped, zoom in for more)' : '') + '. Click a walk to load its route.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
 }
 $('searchBtn').onclick = runSearch;
 
@@ -662,8 +683,8 @@ async function del(id) {
 }
 
 // ---- Rendering ----
-function render() {
-  clearSelection();
+function render(keep) {
+  if (!keep) clearSelection();
   const list = $('list'); list.textContent = '';
   layerGroup.clearLayers(); lines = {};
   const all = [];
@@ -716,6 +737,7 @@ function render() {
     }
   });
   if (mode === 'box' && all.length) map.fitBounds(L.featureGroup(all).getBounds(), {padding:[30,30], maxZoom: 14});
+  if (keep && sel) { const el = $('w' + sel.r.osm_id); if (el) el.classList.add('sel'); if (lines[sel.r.osm_id]) lines[sel.r.osm_id].setStyle({opacity: 0}); }
 }
 const loadingIds = new Set();
 async function openWalk(id) {          // routes are fetched only when a walk is clicked

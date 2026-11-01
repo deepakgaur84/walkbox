@@ -95,6 +95,8 @@ _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
 _weather_cache = {}
+_search_cache = {}
+SEARCH_TTL = int(os.environ.get("SEARCH_CACHE_SECONDS", "900"))
 _places_cache = {}
 _rate_calls = {}
 
@@ -468,15 +470,19 @@ def _km(p):
 
 
 def list_osm(s, w, n, e, want_routes, want_paths):
-    """Cheap OSM search: names, tags and bounding boxes only (no geometry)."""
-    bbox = "(%f,%f,%f,%f)" % (s, w, n, e)
-    parts = ["[out:json][timeout:25];"]
+    """Cheap OSM search: names, tags and bounding boxes only (no geometry).
+
+    Exact tag matches (not regular expressions) and one global bbox keep the query fast on busy servers.
+    """
+    head = "[out:json][timeout:25][bbox:%f,%f,%f,%f];" % (s, w, n, e)
+    rel_types = [t for t in ROUTE_TYPES.split("|") if t]
+    way_types = [t for t in PATH_HIGHWAYS.split("|") if t]
+    parts = [head]
     if want_routes:
-        parts.append('rel["type"="route"]["route"~"^(%s)$"]%s->.r;' % (ROUTE_TYPES, bbox))
+        parts.append("(%s)->.r;" % "".join('rel["type"="route"]["route"="%s"];' % t for t in rel_types))
     if want_paths:
-        parts.append(
-            'way["highway"~"^(%s)$"]["name"]["access"!~"^(private|no)$"]["foot"!="no"]%s->.p;'
-            % (PATH_HIGHWAYS, bbox))
+        parts.append("(%s)->.p;" % "".join(
+            'way["highway"="%s"]["name"]["access"!~"^(private|no)$"]["foot"!="no"];' % t for t in way_types))
     if want_routes:
         parts.append(".r out tags bb %d;" % MAX_RESULTS)
     if want_paths:
@@ -845,14 +851,27 @@ def api_search():
     sources = [x for x in (b.get("sources") or ALL_SOURCES) if x in ALL_SOURCES]
     if not sources:
         return jsonify(error="Choose at least one source"), 400
-    walks, problems = search_all(s, w, n, e, sources)
+    t0 = time.time()
+    key = (round(s, 3), round(w, 3), round(n, 3), round(e, 3), tuple(sorted(sources)))
+    hit = _search_cache.get(key)
+    if hit and time.time() - hit[0] < SEARCH_TTL:
+        walks, problems = hit[1], hit[2]
+        with _cache_lock:                              # make sure the results can still be opened
+            for wk in walks:
+                _cache.setdefault(wk["osm_id"], wk)
+    else:
+        walks, problems = search_all(s, w, n, e, sources)
+        if not problems:                               # never remember a partial or failed search
+            _search_cache[key] = (time.time(), walks, problems)
+            if len(_search_cache) > 200:
+                _search_cache.clear()
     if not walks and problems:
         return jsonify(error="Could not search: " + " | ".join(problems)), 502
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
     order = {"doc": 0, "nz-track": 1, "osm-route": 2, "osm-path": 3}
     walks.sort(key=lambda x: (order.get(x["source"], 9), -(x["distance_km"] or 0)))
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks],
-                   warnings=problems, capped=len(walks) >= MAX_RESULTS)
+                   warnings=problems, capped=len(walks) >= MAX_RESULTS, ms=int((time.time() - t0) * 1000))
 
 
 @app.post("/api/walks")
