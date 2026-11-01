@@ -26,53 +26,106 @@ def seg(i):
     return way_geom((lat0, 174.77), (lat0 - 0.004, 174.77))
 
 
-OVERPASS = {"elements": [
-    {"type": "relation", "id": 111, "tags": {"name": "Test Loop & Ridge", "ref": "T1", "route": "hiking",
-                                              "operator": "DOC", "description": "A <nice> walk",
-                                              "sac_scale": "mountain_hiking"},
-     "members": [rel_way((-41.0, 174.0), (-41.0, 174.01)),
-                 rel_way((-41.01, 174.02), (-41.0, 174.01)),
-                 rel_way((-41.01, 174.02), (-41.02, 174.03)),
-                 rel_way((-42.0, 175.0), (-42.0, 175.01))]},
-    {"type": "relation", "id": 222, "tags": {"route": "foot"}, "members": [rel_way((-40, 170), (-40, 170.1))]},
-    {"type": "relation", "id": 333, "tags": {"name": "Empty"}, "members": []},
-    # named paths: one walk made of three ways; one short path; one generic name
-    {"type": "way", "id": 1, "tags": {"name": "Takapuna Beach Walkway", "highway": "footway"}, "geometry": seg(0)},
-    {"type": "way", "id": 2, "tags": {"name": "Takapuna Beach Walkway", "highway": "footway"}, "geometry": seg(1)},
-    {"type": "way", "id": 3, "tags": {"name": "Takapuna Beach Walkway", "highway": "path"}, "geometry": seg(2)},
-    {"type": "way", "id": 4, "tags": {"name": "Tiny Alley", "highway": "footway"},
-     "geometry": way_geom((-36.8, 174.8), (-36.8005, 174.8))},
-    {"type": "way", "id": 8, "tags": {"name": "Rocky Headland Track", "highway": "path"}, "geometry": seg(10)},
-    {"type": "way", "id": 9, "tags": {"name": "Rocky Headland Track", "highway": "path"}, "geometry": seg(11)},
-    {"type": "way", "id": 10, "tags": {"name": "Rocky Headland Track", "highway": "path"}, "geometry": seg(12)},
-    {"type": "way", "id": 5, "tags": {"name": "Footpath", "highway": "footway"}, "geometry": seg(5) + seg(6)},
-]}
+def bounds_of(geom):
+    lats, lons = [p["lat"] for p in geom], [p["lon"] for p in geom]
+    return {"minlat": min(lats), "minlon": min(lons), "maxlat": max(lats), "maxlon": max(lons)}
 
-DOC = {"features": [{
+
+REL_MEMBERS = {
+    111: [rel_way((-41.0, 174.0), (-41.0, 174.01)), rel_way((-41.01, 174.02), (-41.0, 174.01)),
+          rel_way((-41.01, 174.02), (-41.02, 174.03)), rel_way((-42.0, 175.0), (-42.0, 175.01))],
+    222: [rel_way((-40, 170), (-40, 170.1))],
+}
+REL_TAGS = {
+    111: {"name": "Test Loop & Ridge", "ref": "T1", "route": "hiking", "operator": "DOC",
+          "description": "A <nice> walk", "sac_scale": "mountain_hiking"},
+    222: {"route": "foot"},
+}
+WAYS = [  # (id, name, geometry)
+    (1, "Takapuna Beach Walkway", seg(0)), (2, "Takapuna Beach Walkway", seg(1)), (3, "Takapuna Beach Walkway", seg(2)),
+    (4, "Tiny Alley", way_geom((-36.8, 174.8), (-36.8005, 174.8))),
+    (8, "Rocky Headland Track", seg(10)), (9, "Rocky Headland Track", seg(11)), (10, "Rocky Headland Track", seg(12)),
+    (5, "Footpath", seg(5) + seg(6)),
+]
+
+
+def overpass_list():
+    els = []
+    for rid, members in REL_MEMBERS.items():
+        geoms = [m["geometry"] for m in members]
+        allp = [p for g in geoms for p in g]
+        els.append({"type": "relation", "id": rid, "tags": REL_TAGS[rid], "bounds": bounds_of(allp)})
+    for wid, name, geom in WAYS:
+        els.append({"type": "way", "id": wid, "tags": {"name": name, "highway": "footway"}, "bounds": bounds_of(geom)})
+    return {"elements": els}
+
+
+def fake_overpass(q):
+    calls.append("overpass:" + q)
+    if "out tags bb" in q:
+        return overpass_list()
+    if "rel(id:" in q:
+        ids = [int(x) for x in q.split("rel(id:")[1].split(")")[0].split(",")]
+        return {"elements": [{"type": "relation", "id": i, "tags": REL_TAGS[i], "members": REL_MEMBERS[i]}
+                             for i in ids if i in REL_MEMBERS]}
+    if '["name"="' in q:
+        name = q.split('["name"="')[1].split('"]')[0]
+        return {"elements": [{"type": "way", "id": wid, "tags": {"name": n, "highway": "footway"}, "geometry": g}
+                             for wid, n, g in WAYS if n == name]}
+    if "out tags center" in q:
+        return PLACES_OVERPASS
+    raise AssertionError("unexpected overpass query: " + q[:80])
+
+
+DOC_DETAIL = {"features": [{
     "id": 7,
     "geometry": {"type": "LineString", "coordinates": [[174.0, -36.0], [174.0, -36.02], [174.01, -36.04]]},
     "properties": {"OBJECTID": 7, "name": "Test Kauri Track", "introduction": "Big trees.",
                    "difficulty": "Easy", "completionTime": "1 hr 30 min one way", "region": "Northland",
                    "walkingAndTrampingWebPage": "https://www.doc.govt.nz/x"},
 }]}
+DOC_LIST = {"features": [{"attributes": {
+    "OBJECTID": 7, "name": "Test Kauri Track", "introduction": "Big trees.", "difficulty": "Easy",
+    "completionTime": "1 hr 30 min one way", "region": "Northland",
+    "walkingAndTrampingWebPage": "https://www.doc.govt.nz/x", "Shape__Length": 3200.0}}]}
 
 
 def feat(i, name, walk, geom, **props):
     line = [[p["lon"], p["lat"]] for p in geom]
-    base = {"OBJECTID": i, "Name": name, "Walk": walk, "Locality": "Takapuna",
+    base = {"OBJECTID": i, "Name": name, "Walk": walk, "Locality": "Takapuna", "LocalAuthority": "Auckland Council",
             "DogAccess": "OnLeash", "MobilityAccess": "Yes", "WebLink": "https://example.org/walkway",
             "Description": "Coastal boardwalk and sand.", "ManagedBy": "Auckland Council"}
     base.update(props)
     return {"id": i, "geometry": {"type": "LineString", "coordinates": line}, "properties": base}
 
 
-NZT = {"features": [
-    feat(1, "Takapuna Beach Walkway", 2, seg(0)),
-    feat(2, "Takapuna Beach Walkway", 3, seg(1)),
-    feat(3, "Takapuna Beach Walkway", 2, seg(2)),
-    feat(4, "Bit of Path", 1, way_geom((-36.8, 174.8), (-36.8008, 174.8))),   # too short
-    feat(5, "Test Kauri Track", 3, way_geom((-36.0, 174.0), (-36.05, 174.0))),  # duplicate of DOC name
+NZ_ROWS = [
+    (1, "Takapuna Beach Walkway", 2, seg(0), 445.0), (2, "Takapuna Beach Walkway", 3, seg(1), 445.0),
+    (3, "Takapuna Beach Walkway", 2, seg(2), 445.0),
+    (4, "Bit of Path", 1, way_geom((-36.8, 174.8), (-36.8008, 174.8)), 89.0),         # too short
+    (5, "Test Kauri Track", 3, way_geom((-36.0, 174.0), (-36.05, 174.0)), 5500.0),   # duplicate of the DOC name
+]
+NZT_DETAIL = {"features": [feat(i, n, w, g) for i, n, w, g, _ in NZ_ROWS]}
+NZT_LIST = {"features": [{"attributes": dict(feat(i, n, w, g)["properties"], Shape__Length=L)} for i, n, w, g, L in NZ_ROWS]}
+
+PLACES_OVERPASS = {"elements": [
+    {"type": "node", "id": 1, "lat": -36.7955, "lon": 174.7712, "tags": {"amenity": "cafe", "name": "Beach Café", "opening_hours": "Mo-Su 07:00-16:00"}},
+    {"type": "node", "id": 2, "lat": -36.797, "lon": 174.77003, "tags": {"amenity": "bench"}},
+    {"type": "node", "id": 3, "lat": -36.797, "lon": 174.7712, "tags": {"amenity": "bench"}},                 # 107 m off: too far for a bench
+    {"type": "way", "id": 4, "center": {"lat": -36.80, "lon": 174.7699}, "tags": {"amenity": "toilets", "name": "Beach toilets"}},
+    {"type": "node", "id": 5, "lat": -36.795, "lon": 174.7760, "tags": {"amenity": "drinking_water"}},         # ~530 m off
+    {"type": "node", "id": 6, "lat": -36.801, "lon": 174.77, "tags": {"tourism": "viewpoint", "name": "Headland view"}},
+    {"type": "node", "id": 7, "lat": -36.792, "lon": 174.77, "tags": {"amenity": "parking"}},                 # not a place we list
+    {"type": "node", "id": 8, "lat": -36.7935, "lon": 174.7703, "tags": {"leisure": "picnic_table"}},
 ]}
+WEATHER = {"current": {"temperature_2m": 17.4, "apparent_temperature": 16.1, "precipitation": 0.0, "weather_code": 61,
+                       "wind_speed_10m": 14.2, "wind_gusts_10m": 27.9, "is_day": 1},
+           "daily": {"time": ["2026-11-02", "2026-11-03", "2026-11-04"], "weather_code": [61, 3, 0],
+                     "temperature_2m_max": [19.2, 18.0, 21.5], "temperature_2m_min": [12.1, 11.0, 12.9],
+                     "precipitation_probability_max": [60, 20, 5], "precipitation_sum": [2.4, 0.0, 0.0],
+                     "wind_speed_10m_max": [31.0, 22.0, 15.0], "uv_index_max": [5.1, 6.0, 8.2],
+                     "sunrise": ["2026-11-02T06:10", "2026-11-03T06:09", "2026-11-04T06:07"],
+                     "sunset": ["2026-11-02T19:55", "2026-11-03T19:56", "2026-11-04T19:57"]}}
 
 
 def cpage(pid, idx, title, url, mime="image/jpeg", width=2000, artist="<a href='x'>Jo Photog</a>",
@@ -101,21 +154,27 @@ class Resp:
 
 
 calls = []
+get_log = []
 
 
 def fake_get(url, **kw):
     calls.append(url)
+    params = kw.get("params") or {}
+    get_log.append((url, params))
+    if "api.open-meteo.com/v1/forecast" in url:
+        return Resp(WEATHER)
     if "open-meteo" in url or "elevation" in url:
-        n = len(kw["params"]["latitude"].split(","))
+        n = len(params["latitude"].split(","))
         return Resp({"elevation": [100 + (i % 10) * 3 for i in range(n)]})
     if "commons.wikimedia.org" in url:
         return Resp(COMMONS)
+    light = params.get("returnGeometry") == "false"
     if "b5ADKIcWivL5vNaV" in url:
-        return Resp(NZT)
-    return Resp(DOC)
+        return Resp(NZT_LIST if light else NZT_DETAIL)
+    return Resp(DOC_LIST if light else DOC_DETAIL)
 
 
-wb.overpass = lambda q: (calls.append("overpass:" + q) or OVERPASS)
+wb.overpass = fake_overpass
 wb.requests.get = fake_get
 c = wb.app.test_client()
 
@@ -126,64 +185,86 @@ assert wb.route_type_of([[(0, 0), (0, 0.01), (0.01, 0.01), (0.0001, 0.0001)]]) =
 assert wb.route_type_of([[(0, 0), (0, 0.05)]]) == "Point to point"
 assert wb.est_minutes(5, 100) == 70 and wb.fmt_minutes(70) == "1 h 10 min"
 
-# --- search (all sources, NZ area)
+# --- search returns a light list: no route lines, no geometry downloads
 body = {"south": -36.9, "west": 174.7, "north": -36.7, "east": 174.9}
 r = c.post("/api/search", json=body)
 assert r.status_code == 200, r.data
 res = r.get_json()["results"]
 by_name = {x["name"]: x for x in res}
-assert "Test Loop & Ridge" in by_name and "Test Kauri Track" in by_name
-assert "Takapuna Beach Walkway" in by_name, list(by_name)
-assert "Tiny Alley" not in by_name and "Footpath" not in by_name  # too short / generic
-assert not any(x["name"] == "Empty" for x in res)
-walkway = by_name["Takapuna Beach Walkway"]
-assert walkway["source"] == "nz-track" and walkway["distance_km"] > 1.0 and len(walkway["line"]) == 1, walkway
-assert walkway["difficulty"] == "Walking track" and walkway["region"] == "Takapuna", walkway  # hardest grade wins
-assert "Dogs: on lead only." in walkway["description"] and walkway["link"] == "https://example.org/walkway"
-assert sum(1 for x in res if x["name"] == "Takapuna Beach Walkway") == 1  # OSM duplicate dropped
-assert "Bit of Path" not in by_name  # too short
-assert sum(1 for x in res if x["name"] == "Test Kauri Track") == 1 and by_name["Test Kauri Track"]["source"] == "doc"
-assert by_name["Rocky Headland Track"]["source"] == "osm-path"
-assert by_name["Test Kauri Track"]["source"] == "doc" and by_name["Test Kauri Track"]["difficulty"] == "Easy"
-assert by_name["Test Kauri Track"]["time_text"].startswith("1 hr")
-assert by_name["Test Loop & Ridge"]["difficulty"] == "Moderate"  # from sac_scale
-assert res[0]["source"] == "doc"  # DOC listed first
-srcs = [x["source"] for x in res]
-assert srcs.index("nz-track") < srcs.index("osm-route") < srcs.index("osm-path")
-
-# single query to Overpass combines relations and paths
+assert all("line" not in x for x in res), "search must not return route geometry"
 oq = [x for x in calls if x.startswith("overpass:")][-1]
-assert "->.r;" in oq and "->.p;" in oq and ".r out tags geom" in oq and ".p out tags geom" in oq
+assert "out tags bb" in oq and "out tags geom" not in oq and "->.r;" in oq and "->.p;" in oq
+assert all(p.get("returnGeometry") == "false" for u, p in get_log if "arcgis" in u or "b5ADKIcWivL5vNaV" in u)
+
+assert "Test Loop & Ridge" in by_name and "Test Kauri Track" in by_name and "Takapuna Beach Walkway" in by_name, list(by_name)
+assert "Tiny Alley" not in by_name and "Footpath" not in by_name and "Bit of Path" not in by_name
+walkway = by_name["Takapuna Beach Walkway"]
+assert walkway["source"] == "nz-track" and not walkway["approx"] and 1.3 < walkway["distance_km"] < 1.4, walkway
+assert walkway["difficulty"] == "Walking track" and walkway["region"] == "Takapuna"
+assert "Dogs: on lead only." in walkway["description"] and walkway["link"] == "https://example.org/walkway"
+assert sum(1 for x in res if x["name"] == "Takapuna Beach Walkway") == 1       # OSM duplicate dropped
+kauri = by_name["Test Kauri Track"]
+assert kauri["source"] == "doc" and kauri["distance_km"] == 3.2 and kauri["difficulty"] == "Easy"
+assert kauri["time_text"].startswith("1 hr") and sum(1 for x in res if x["name"] == "Test Kauri Track") == 1
+loop = by_name["Test Loop & Ridge"]
+assert loop["source"] == "osm-route" and loop["distance_km"] is None and loop["difficulty"] == "Moderate" and loop["ref"] == "T1"
+assert loop["time_text"] is None and by_name["Unnamed route 222"]["osm_id"] == 222
+rocky = by_name["Rocky Headland Track"]
+assert rocky["source"] == "osm-path" and rocky["approx"] and rocky["distance_km"] >= 0.8
+srcs = [x["source"] for x in res]
+assert res[0]["source"] == "doc" and srcs.index("nz-track") < srcs.index("osm-route") < srcs.index("osm-path")
 
 # source selection / validation
 calls.clear()
 r = c.post("/api/search", json=dict(body, sources=["doc"]))
 assert [x["source"] for x in r.get_json()["results"]] == ["doc"] and not any(x.startswith("overpass:") for x in calls)
 assert c.post("/api/search", json=dict(body, sources=["bogus"])).status_code == 400
-# DOC is skipped outside New Zealand
 calls.clear()
 c.post("/api/search", json={"south": 51.4, "west": -0.3, "north": 51.6, "east": -0.1, "sources": ["doc"]})
-assert not any("arcgis" in x for x in calls)
+assert not any("arcgis" in x for x in calls)                                   # DOC is skipped outside NZ
 assert c.post("/api/search", json={"south": 0, "west": 0, "north": 5, "east": 5}).status_code == 400
 assert c.post("/api/search", json={}).status_code == 400
 
 # one source failing does not hide the others
 def boom(q):
     raise RuntimeError("overpass-api.de: timed out")
-good = wb.overpass
 wb.overpass = boom
-r = c.post("/api/search", json=body)
-j = r.get_json()
-assert r.status_code == 200 and j["warnings"] and any(x["source"] == "doc" for x in j["results"])
-wb.overpass = good
-c.post("/api/search", json=body)  # refill cache
+j = c.post("/api/search", json=body).get_json()
+assert j["warnings"] and any(x["source"] == "doc" for x in j["results"]) and not any(x["source"] == "osm-route" for x in j["results"])
+wb.overpass = fake_overpass
+c.post("/api/search", json=body)      # refill the cache
 
-# --- add (computes ascent), dedupe, expired ids
-ids = [111, walkway["osm_id"], by_name["Test Kauri Track"]["osm_id"], 222]
+# --- detail on click: each source loads its own route, keeping the list's id
+calls.clear()
+d = c.post("/api/detail", json={"id": 111}).get_json()
+assert d["osm_id"] == 111 and len(d["line"]) == 2 and d["distance_km"] > 1 and d["route_type"] and "Moderate" == d["difficulty"], d
+assert any("rel(id:111)" in x for x in calls if x.startswith("overpass:"))
+dn = c.post("/api/detail", json={"id": walkway["osm_id"]}).get_json()
+assert dn["osm_id"] == walkway["osm_id"] and len(dn["line"]) == 1 and 1.3 < dn["distance_km"] < 1.4 and dn["difficulty"] == "Walking track"
+dd = c.post("/api/detail", json={"id": kauri["osm_id"]}).get_json()
+assert dd["osm_id"] == kauri["osm_id"] and dd["line"] and dd["link"] == "https://www.doc.govt.nz/x"
+assert any("OBJECTID=7" in p.get("where", "") for u, p in get_log)
+dr = c.post("/api/detail", json={"id": rocky["osm_id"]}).get_json()
+assert dr["osm_id"] == rocky["osm_id"] and dr["name"] == "Rocky Headland Track" and dr["distance_km"] > 1.0 and dr["line"], dr
+assert any('["name"="Rocky Headland Track"]' in x for x in calls if x.startswith("overpass:"))
+nz_where = [p["where"] for u, p in get_log if "b5ADKIcWivL5vNaV" in u and "returnGeometry" not in p][-1]
+assert "Name='Takapuna Beach Walkway'" in nz_where and "Walk IN" in nz_where
+n_calls = len(calls)
+c.post("/api/detail", json={"id": 111}); assert len(calls) == n_calls          # second click is served from the cache
+assert c.post("/api/detail", json={"id": 424242}).status_code == 409
+assert c.post("/api/detail", json={"id": "x"}).status_code == 400
+
+# --- add fetches the routes for walks that were never clicked, computes ascent, dedupes
+fresh = c.post("/api/search", json=body).get_json()["results"]
+assert all("line" not in x for x in fresh)
+nz_id = walkway["osm_id"]
+ids = [111, nz_id, kauri["osm_id"], 222]
 r = c.post("/api/walks", json={"ids": ids, "place": "Takapuna, Auckland"})
 assert r.get_json()["added"] == 4, r.data
 assert c.post("/api/walks", json={"ids": [111]}).get_json()["added"] == 0
 assert c.post("/api/walks", json={"ids": [wb.PATH_BASE + 5]}).status_code == 409
+by_name = {x["name"]: x for x in fresh}
+res = fresh
 
 # --- library
 lib = lambda q: c.get("/api/library?" + q).get_json()["results"]
@@ -419,6 +500,51 @@ pts, tot = wb.sample_profile([(0, 0), (0, 0.01), (0.01, 0.01)], n=11)
 assert len(pts) == 11 and abs(pts[0][2]) < 1e-9 and abs(pts[-1][2] - tot) < 1e-6 and abs(pts[5][0]) < 1e-6 and abs(pts[5][1] - 0.01) < 1e-3
 page = c.get("/").data
 assert b'id="elev"' in page and b'id="livebar"' in page and b"selectWalk" in page
+
+# --- Weather
+good_get = wb.requests.get
+wr = c.get("/api/weather?lat=-36.79&lon=174.77")
+wj = wr.get_json()
+assert wr.status_code == 200, wj
+assert wj["now"]["text"] == "Light rain" and wj["now"]["temp"] == 17.4 and wj["now"]["gust"] == 27.9 and len(wj["days"]) == 3
+assert wj["days"][0]["sunset"] == "19:55" and wj["days"][0]["rain_prob"] == 60 and wj["days"][2]["text"] == "Clear sky"
+assert wj["days"][0]["tmin"] == 12.1 and wj["days"][0]["uv"] == 5.1 and wj["attribution"].startswith("Weather data by Open-Meteo")
+forecasts = lambda: sum(1 for u in calls if "v1/forecast" in u)
+n0 = forecasts(); assert c.get("/api/weather?lat=-36.79&lon=174.77").status_code == 200 and forecasts() == n0   # cached for 10 minutes
+assert c.get("/api/weather").status_code == 400 and c.get("/api/weather?lat=999&lon=0").status_code == 400
+wb.requests.get = down
+r502 = c.get("/api/weather?lat=-41.3&lon=174.8")
+assert r502.status_code == 502 and "Weather unavailable" in r502.get_json()["error"]
+wb.requests.get = good_get
+assert wb.wmo(61) == ("Light rain", "🌦️") and wb.wmo(12345)[0] == "Unknown"
+
+# --- Nearby places (food, water, toilets, rest spots, viewpoints)
+assert wb.classify_place({"amenity": "cafe"}) == ("food", "Café")
+assert wb.classify_place({"shop": "bakery"})[0] == "food" and wb.classify_place({"amenity": "parking"}) == (None, None)
+assert wb.classify_place({"leisure": "picnic_table"}) == ("rest", "Picnic spot") and wb.classify_place({"tourism": "viewpoint"})[0] == "view"
+line = [(0.0, 0.0), (0.01, 0.0)]; cum2 = [0.0, wb.haversine_m(line[0], line[1])]
+al, off = wb.along_and_off(0.005, 0.0009, line, cum2)
+assert abs(al - cum2[1] / 2) < 5 and 95 < off < 105
+pc = lambda: sum(1 for x in calls if x.startswith("overpass:") and "out tags center" in x)
+pj = c.get("/api/walks/%d/places" % nz_id).get_json()
+assert pj["counts"] == {"food": 1, "water": 0, "toilets": 1, "rest": 2, "view": 1}, pj["counts"]
+byname = {x["name"]: x for x in pj["places"] if x["name"]}
+cafe = byname["Beach Café"]
+assert cafe["kind"] == "food" and cafe["hours"] == "Mo-Su 07:00-16:00" and 90 < cafe["off_m"] < 130 and 0.4 < cafe["along_km"] < 0.8, cafe
+assert byname["Beach toilets"]["kind"] == "toilets" and byname["Headland view"]["kind"] == "view"   # a way's centre point works too
+assert all(x["kind"] != "rest" or x["off_m"] <= 60 for x in pj["places"])                          # the far bench is left out
+alongs = [x["along_km"] for x in pj["places"]]
+assert alongs == sorted(alongs) and all(0 <= a_ <= pj["total_km"] + 0.01 for a_ in alongs)
+assert pj["kinds"]["food"]["icon"] == "☕" and pj["kinds"]["water"]["label"] == "Drinking water"
+n1 = pc(); assert c.get("/api/walks/%d/places" % nz_id).get_json() == pj and pc() == n1                # cached for an hour
+assert c.get("/api/walks/999999/places").status_code == 404
+assert c.get("/api/walks/%d/places" % rocky["osm_id"]).status_code == 200                           # a search result that was never opened
+wb._places_cache.clear(); wb.overpass = boom
+e502 = c.get("/api/walks/%d/places" % nz_id)
+assert e502.status_code == 502 and "Nearby places unavailable" in e502.get_json()["error"]
+wb.overpass = fake_overpass; wb._places_cache.clear()
+page = c.get("/").data
+assert b'id="info"' in page and b"renderPlaces" in page and b"openWalk" in page
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]

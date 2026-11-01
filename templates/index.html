@@ -24,6 +24,20 @@
   #elev .cap { font-size:10px; color:var(--mute); }
   #elev svg { display:block; }
   .me { width:22px; height:22px; border-radius:50%; background:#1a73e8; border:3px solid #fff; box-shadow:0 0 0 2px rgba(26,115,232,.35), 0 1px 4px rgba(0,0,0,.5); box-sizing:border-box; }
+  #info { position:absolute; left:12px; top:84px; width:272px; max-height:calc(100% - 290px); overflow:auto; z-index:900; background:#fff; border-radius:14px; box-shadow:0 2px 10px rgba(0,0,0,.3); font-size:13px; display:none; }
+  #info .ih { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; cursor:pointer; font-weight:600; user-select:none; }
+  #info .ib { padding:0 12px 10px; }
+  #info .wnow { font-size:15px; font-weight:600; margin-bottom:2px; }
+  #info .day { display:flex; justify-content:space-between; gap:6px; padding:3px 0; border-top:1px solid var(--line); }
+  #info .sub { color:var(--mute); font-size:12px; }
+  #info .chips2 { display:flex; flex-wrap:wrap; gap:5px; margin:8px 0 4px; }
+  #info .chips2 button { border:1px solid var(--line); background:#fff; border-radius:16px; padding:3px 9px; cursor:pointer; font-size:13px; }
+  #info .chips2 button.on { background:var(--brand2); border-color:var(--brand); color:var(--brand); font-weight:600; }
+  #info .chips2 button:disabled { opacity:.4; cursor:default; }
+  #info .pl { padding:4px 0; border-top:1px solid var(--line); cursor:pointer; }
+  #info .sec { font-weight:600; margin-top:8px; }
+  .poi { width:24px; height:24px; border-radius:50%; background:#fff; border:2px solid #555; text-align:center; line-height:19px; font-size:13px; box-sizing:border-box; }
+  @media (max-width:800px) { #info { width:calc(100% - 24px); max-height:38%; } }
   .arr { width:18px; height:18px; border-radius:50%; background:#fff; border:2px solid #1b5e20; color:#1b5e20; font-size:9px; line-height:14px; text-align:center; box-sizing:border-box; }
   .pin { width:20px; height:20px; border-radius:50%; border:3px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.6); box-sizing:border-box; }
   .pin.start { background:linear-gradient(90deg,#1b5e20 50%,#222 50%); }
@@ -115,6 +129,7 @@
     <div id="map"></div>
     <div id="livebar"></div>
     <div id="elev"></div>
+    <div id="info"></div>
   </div>
 </main>
 
@@ -195,7 +210,7 @@ async function runSearch() {
     if (mine !== searchSeq) return;           // stale reply
     results = j.results; selected.clear();
     const warn = j.warnings && j.warnings.length ? ' Note: ' + j.warnings.join(' | ') : '';
-    status((results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
+    status((results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '. Click a walk to load its route.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
     $('findActions').style.display = results.length ? '' : 'none';
     render();
   } catch (e) {
@@ -372,6 +387,7 @@ function routeToStart(r, out, btn) {
 // ---- Selected walk: styled route, live GPS dot and elevation profile ----
 let sel = null;   // the walk currently shown in "navigation view"
 function clearSelection() {
+  const inf = $('info'); inf.style.display = 'none'; inf.textContent = '';
   if (!sel) return;
   if (sel.watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(sel.watchId);
   sel.layers.forEach(l => map.removeLayer(l));
@@ -407,7 +423,79 @@ function selectWalk(r) {
   map.fitBounds(L.featureGroup(paths).getBounds(), {paddingTopLeft: [40, 50], paddingBottomRight: [40, 150], animate: false});
   drawArrows(s);
   loadProfile(s);
+  loadInfo(s);
   startLive(s);
+}
+
+let infoOpen = window.innerWidth > 800;
+function dayLabel(d, i) { return i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : new Date(d + 'T12:00:00').toLocaleDateString(undefined, {weekday: 'short'}); }
+function renderWeather(box, w) {
+  const n = w.now, t = v => v == null ? '–' : Math.round(v) + '°';
+  const now = document.createElement('div'); now.className = 'wnow'; now.textContent = n.icon + ' ' + t(n.temp) + '  ' + n.text; box.appendChild(now);
+  const sub = document.createElement('div'); sub.className = 'sub';
+  sub.textContent = 'Feels like ' + t(n.feels) + ' · wind ' + Math.round(n.wind || 0) + ' km/h (gusts ' + Math.round(n.gust || 0) + ')' + (n.rain_mm ? ' · ' + n.rain_mm + ' mm rain now' : '');
+  box.appendChild(sub);
+  w.days.forEach((d, i) => {
+    const row = document.createElement('div'); row.className = 'day';
+    const a = document.createElement('span'); a.textContent = dayLabel(d.date, i) + ' ' + d.icon + ' ' + t(d.tmin) + '–' + t(d.tmax);
+    const b = document.createElement('span'); b.className = 'sub';
+    b.textContent = (d.rain_prob != null ? d.rain_prob + '% rain' : '') + (d.uv != null ? ' · UV ' + Math.round(d.uv) : '') + (i === 0 && d.sunset ? ' · ☀ sets ' + d.sunset : '');
+    row.append(a, b); box.appendChild(row);
+  });
+  const at = document.createElement('div'); at.className = 'sub'; at.style.marginTop = '4px'; at.textContent = w.attribution; box.appendChild(at);
+}
+function renderPlaces(box, s, data) {
+  const on = new Set(Object.keys(data.kinds));            // every kind starts switched on
+  const chipsBar = document.createElement('div'); chipsBar.className = 'chips2'; box.appendChild(chipsBar);
+  const list = document.createElement('div'); box.appendChild(list);
+  const layer = L.layerGroup().addTo(map); s.layers.push(layer);
+  const draw = () => {
+    layer.clearLayers(); list.textContent = '';
+    const shown = data.places.filter(p => on.has(p.kind));
+    shown.forEach(p => {
+      const k = data.kinds[p.kind];
+      const mk = L.marker([p.lat, p.lon], {icon: L.divIcon({className: '', html: '<div class="poi">' + k.icon + '</div>', iconSize: [24, 24], iconAnchor: [12, 12]}), keyboard: false});
+      const pop = document.createElement('div'); const b = document.createElement('b'); b.textContent = p.name || p.label; pop.appendChild(b);
+      const d = document.createElement('div'); d.textContent = p.label + ' · ' + p.along_km.toFixed(1) + ' km along · ' + p.off_m + ' m off the route'; pop.appendChild(d);
+      if (p.hours) { const o = document.createElement('div'); o.textContent = 'Hours: ' + p.hours; pop.appendChild(o); }
+      mk.bindPopup(pop); layer.addLayer(mk);
+      const row = document.createElement('div'); row.className = 'pl';
+      row.textContent = k.icon + ' ' + (p.name || p.label) + (p.name ? ' (' + p.label.toLowerCase() + ')' : '') + ' · ' + p.along_km.toFixed(1) + ' km';
+      row.onclick = () => { map.setView([p.lat, p.lon], Math.max(map.getZoom(), 17)); mk.openPopup(); };
+      list.appendChild(row);
+    });
+    if (!shown.length) { const e = document.createElement('div'); e.className = 'sub'; e.textContent = 'Nothing switched on.'; list.appendChild(e); }
+  };
+  Object.entries(data.kinds).forEach(([kind, k]) => {
+    const btn = document.createElement('button'); btn.title = k.label; btn.textContent = k.icon + ' ' + (data.counts[kind] || 0);
+    if (!data.counts[kind]) { btn.disabled = true; on.delete(kind); } else btn.className = 'on';
+    btn.onclick = () => { if (on.has(kind)) { on.delete(kind); btn.className = ''; } else { on.add(kind); btn.className = 'on'; } draw(); };
+    chipsBar.appendChild(btn);
+  });
+  draw();
+  const at = document.createElement('div'); at.className = 'sub'; at.style.marginTop = '4px';
+  at.textContent = 'Places within a short distance of the route, from OpenStreetMap. They may be closed or out of date. Tap one for details.'; box.appendChild(at);
+}
+function loadInfo(s) {
+  const el = $('info'); el.style.display = 'block'; el.textContent = '';
+  const head = document.createElement('div'); head.className = 'ih';
+  const ttl = document.createElement('span'); ttl.textContent = 'Weather & nearby'; const arrow = document.createElement('span');
+  head.append(ttl, arrow);
+  const body = document.createElement('div'); body.className = 'ib';
+  const setOpen = o => { infoOpen = o; body.style.display = o ? '' : 'none'; arrow.textContent = o ? '▾' : '▸'; };
+  head.onclick = () => setOpen(!infoOpen); setOpen(infoOpen);
+  el.append(head, body);
+  const wbox = document.createElement('div'); wbox.textContent = 'Loading weather…'; wbox.className = 'sub';
+  const sec = document.createElement('div'); sec.className = 'sec'; sec.textContent = 'Along the route';
+  const pbox = document.createElement('div'); pbox.textContent = 'Looking for cafés, water, toilets and rest spots…'; pbox.className = 'sub';
+  body.append(wbox, sec, pbox);
+  const mid = pointAt(s.chain, s.cum, s.cum[s.cum.length - 1] / 2);
+  fetch('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4)).then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Weather failed'); return j; })
+    .then(w => { if (sel === s) { wbox.textContent = ''; wbox.className = ''; renderWeather(wbox, w); } })
+    .catch(e => { if (sel === s) wbox.textContent = e.message; });
+  fetch('/api/walks/' + s.r.osm_id + '/places').then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Places failed'); return j; })
+    .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, d); } })
+    .catch(e => { if (sel === s) pbox.textContent = e.message; });
 }
 
 async function loadProfile(s) {
@@ -479,7 +567,7 @@ function startLive(s) {
     s.along = near ? a.along : null;
     bar.className = near ? 'ok' : 'off';
     if (near) {
-      const km = s.profile ? s.profile.total_km : s.r.distance_km, done = km * a.along / total;
+      const km = s.profile ? s.profile.total_km : total / 1000, done = km * a.along / total;
       bar.textContent = 'On the route · ' + done.toFixed(1) + ' km done · ' + Math.max(0, km - done).toFixed(1) + ' km to go';
     } else {
       bar.textContent = 'Off the route · ' + fmtDist(a.off) + ' from the nearest point of the line';
@@ -590,7 +678,7 @@ function render() {
     const t = document.createElement('div'); t.className = 't'; t.textContent = r.name;
     if (r.added && mode === 'find') { const bd = document.createElement('span'); bd.className = 'badge'; bd.textContent = 'in box'; t.appendChild(bd); }
     const m = document.createElement('div'); m.className = 'm';
-    m.textContent = [r.distance_km.toFixed(1) + ' km', r.route_type, r.time_text, r.ascent_m ? ('↑ ' + Math.round(r.ascent_m) + ' m') : null, r.region || r.place].filter(Boolean).join(' · ');
+    m.textContent = [r.distance_km != null ? (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km' : null, r.route_type, r.time_text, r.ascent_m ? ('↑ ' + Math.round(r.ascent_m) + ' m') : null, r.region || r.place].filter(Boolean).join(' · ');
     body.append(t, m);
     const chips = document.createElement('div');
     const chip = (txt, cls) => { const c = document.createElement('span'); c.className = 'chip' + (cls ? ' ' + cls : ''); c.textContent = txt; chips.appendChild(c); };
@@ -608,6 +696,7 @@ function render() {
     }
     { const at = document.createElement('a'); at.href = 'https://www.alltrails.com/search?q=' + encodeURIComponent(r.name + (r.region ? ' ' + r.region : '')); at.target = '_blank'; at.rel = 'noopener'; at.textContent = 'Find on AllTrails ↗'; at.style.cssText = 'font-size:13px;margin-left:10px'; at.onclick = e => e.stopPropagation(); body.appendChild(at); }
     if (r.line && r.line.length && r.line[0].length > 1) body.appendChild(makeNav(r));
+    if (!r.line) { const hint = document.createElement('div'); hint.className = 'm'; hint.style.fontStyle = 'italic'; hint.textContent = 'Click to load the route, elevation, weather and nearby places.'; body.appendChild(hint); }
     if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
     if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
     item.appendChild(body);
@@ -618,13 +707,31 @@ function render() {
       if (mode === 'box') { const b = document.createElement('button'); b.className = 'del'; b.textContent = 'Remove'; b.onclick = e => { e.stopPropagation(); del(r.osm_id); }; acts.appendChild(b); }
       item.appendChild(acts);
     }
-    item.onclick = () => focus(r.osm_id);
+    item.onclick = () => openWalk(r.osm_id);
     list.appendChild(item);
-    const pl = L.polyline(r.line, {color: r.added ? '#2f6f4f' : '#d2691e', weight: 4, opacity: .8})
-      .bindTooltip(r.name).on('click', () => focus(r.osm_id)).addTo(layerGroup);
-    lines[r.osm_id] = pl; all.push(pl);
+    if (r.line && r.line.length) {
+      const pl = L.polyline(r.line, {color: r.added ? '#2f6f4f' : '#d2691e', weight: 4, opacity: .8})
+        .bindTooltip(r.name).on('click', () => openWalk(r.osm_id)).addTo(layerGroup);
+      lines[r.osm_id] = pl; all.push(pl);
+    }
   });
   if (mode === 'box' && all.length) map.fitBounds(L.featureGroup(all).getBounds(), {padding:[30,30], maxZoom: 14});
+}
+const loadingIds = new Set();
+async function openWalk(id) {          // routes are fetched only when a walk is clicked
+  const r = results.find(x => x.osm_id == id); if (!r) return;
+  if (!r.line) {
+    if (loadingIds.has(id)) return;
+    loadingIds.add(id);
+    const el = $('w' + id); if (el) el.style.opacity = .55;
+    status('Loading the route for “' + r.name + '”…');
+    try { Object.assign(r, await post('/api/detail', {id})); status('Loaded “' + r.name + '”.'); }
+    catch (e) { status(e.message, true); loadingIds.delete(id); if (el) el.style.opacity = ''; return; }
+    loadingIds.delete(id);
+    if (!results.includes(r)) return;     // the list changed while loading
+    render();
+  }
+  focus(id);
 }
 function focus(id) {
   document.querySelectorAll('.item').forEach(e => e.classList.remove('sel'));

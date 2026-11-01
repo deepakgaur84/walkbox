@@ -15,6 +15,25 @@ Pick any combination when you search:
 - **Official routes**: named walking route relations in OpenStreetMap. ODbL.
 - **Named paths**: named footpaths in OpenStreetMap, grouped by name into one walk (paths shorter than `MIN_PATH_KM` are ignored). ODbL.
 
+## How searching works (fast list, route on click)
+
+"Find walks in this map view" fetches only a **light list** from the chosen sources, all at the same time: name, source, difficulty and length where the
+source gives one. No route outlines are downloaded at this stage, so it is quick. Lengths of OpenStreetMap named paths are rough (shown with a ~) and
+official OpenStreetMap routes show no length until opened.
+
+The route itself is fetched only when you **click a walk** (or when you add it to your box). After that the walk view opens, with its exact length.
+
+## Weather and nearby places
+
+When a walk is open, a **Weather & nearby** card appears on the map:
+
+- **Weather**: current conditions at the middle of the walk and a three-day outlook (temperature, rain chance, wind, UV, sunset), from the free
+  [Open-Meteo](https://open-meteo.com/) service. Forecasts are cached for 10 minutes.
+- **Along the route**: cafés, restaurants and shops (☕), drinking water (💧), toilets (🚻), rest spots such as benches, picnic tables and shelters (🪑)
+  and viewpoints (👀) near the route, from OpenStreetMap. Tap the chips to show or hide each kind; tap a place in the list or on the map for details such as
+  opening hours. Food places within about 250 m of the route are included, other places within 120 m, and benches within 60 m. OpenStreetMap
+  can be out of date, so a place may have closed.
+
 ## Walk view: route, live GPS and elevation profile
 
 Click any walk in the list and the map switches to a navigation-style view:
@@ -90,6 +109,7 @@ To update after code changes: push to `main`, wait for the green tick on the Act
 | MAX_RESULTS | 150 | Most routes returned per search. |
 | PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |
 | VALHALLA_URL | (blank) | Address of the Valhalla routing engine; blank hides the turn-by-turn buttons. |
+| WEATHER_URL | Open-Meteo forecast API | Weather service used by the weather card. |
 | MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
 | MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
 | MIN_PATH_KM | 0.8 | Shortest named path (grouped by name) listed as a walk. |

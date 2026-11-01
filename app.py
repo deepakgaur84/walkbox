@@ -20,6 +20,7 @@ import time
 import zlib
 import zipfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
 
@@ -44,6 +45,7 @@ NZT_URL = os.environ.get(
     "https://services2.arcgis.com/b5ADKIcWivL5vNaV/ArcGIS/rest/services/"
     "National_Tracks_Dataset_Pilot/FeatureServer/0/query",
 )
+WEATHER_URL = os.environ.get("WEATHER_URL", "https://api.open-meteo.com/v1/forecast")
 COMMONS_URL = os.environ.get("COMMONS_URL", "https://commons.wikimedia.org/w/api.php")
 PHOTOS_PER_MIN = int(os.environ.get("PHOTOS_PER_MINUTE", "30"))
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "").strip().rstrip("/")
@@ -92,6 +94,8 @@ _overpass_lock = threading.Lock()
 _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
+_weather_cache = {}
+_places_cache = {}
 _rate_calls = {}
 
 
@@ -285,8 +289,9 @@ def parse_relation(el):
     return make_walk(el["id"], "osm-route", name, chains, tags)
 
 
-def group_named_paths(elements):
+def group_named_paths(elements, min_km=None):
     """Group named footpath ways into one walk per name."""
+    min_km = MIN_PATH_KM if min_km is None else min_km
     groups = {}
     for el in elements:
         if el.get("type") != "way" or not el.get("geometry"):
@@ -301,7 +306,7 @@ def group_named_paths(elements):
     for name, items in groups.items():
         chains = chain_segments([seg for seg, _ in items])
         dist = sum(chain_length_m(c) for c in chains) / 1000.0
-        if dist < MIN_PATH_KM:
+        if dist < min_km:
             continue
         merged = {}
         for _, t in items:
@@ -434,9 +439,38 @@ def overpass(query):
     raise RuntimeError("; ".join(errors) or "No Overpass server configured")
 
 
-def search_osm(s, w, n, e, want_routes, want_paths):
+def make_light(osm_id, source, name, recipe, tags=None, distance_km=None, approx=False, centre=None, **extra):
+    """A search-result entry with no route geometry yet. The recipe says how to fetch the route later."""
+    tags = tags or {}
+    w = {
+        "osm_id": osm_id, "source": source, "name": name,
+        "ref": tags.get("ref"), "network": tags.get("network"), "operator": tags.get("operator"),
+        "description": tags.get("description") or tags.get("note"),
+        "distance_km": round(distance_km, 2) if distance_km else None, "approx": approx,
+        "lat": centre[0] if centre else None, "lon": centre[1] if centre else None,
+        "tags": tags, "chains": None, "route_type": None, "difficulty": difficulty_from_tags(tags),
+        "ascent_m": None, "link": None, "region": None, "time_text": None, "recipe": recipe,
+    }
+    w.update({k: v for k, v in extra.items() if v is not None})
+    return w
+
+
+def _props(f):
+    return {str(k).lower(): v for k, v in (f.get("attributes") or f.get("properties") or {}).items()}
+
+
+def _km(p):
+    try:
+        v = float(p.get("shape__length"))
+    except (TypeError, ValueError):
+        return None
+    return v / 1000.0 if v > 0 else None
+
+
+def list_osm(s, w, n, e, want_routes, want_paths):
+    """Cheap OSM search: names, tags and bounding boxes only (no geometry)."""
     bbox = "(%f,%f,%f,%f)" % (s, w, n, e)
-    parts = ["[out:json][timeout:40];"]
+    parts = ["[out:json][timeout:25];"]
     if want_routes:
         parts.append('rel["type"="route"]["route"~"^(%s)$"]%s->.r;' % (ROUTE_TYPES, bbox))
     if want_paths:
@@ -444,55 +478,134 @@ def search_osm(s, w, n, e, want_routes, want_paths):
             'way["highway"~"^(%s)$"]["name"]["access"!~"^(private|no)$"]["foot"!="no"]%s->.p;'
             % (PATH_HIGHWAYS, bbox))
     if want_routes:
-        parts.append(".r out tags geom %d;" % MAX_RESULTS)
+        parts.append(".r out tags bb %d;" % MAX_RESULTS)
     if want_paths:
-        parts.append(".p out tags geom %d;" % MAX_PATH_WAYS)
-    data = overpass("".join(parts))
-    elements = data.get("elements", [])
-    walks = []
-    if want_routes:
-        for el in elements:
-            if el.get("type") == "relation":
-                wk = parse_relation(el)
-                if wk:
-                    walks.append(wk)
-    if want_paths:
-        walks.extend(group_named_paths(elements))
+        parts.append(".p out tags bb %d;" % MAX_PATH_WAYS)
+    walks, groups = [], {}
+    for el in overpass("".join(parts)).get("elements", []):
+        b = el.get("bounds")
+        if not b:
+            continue
+        tags = el.get("tags", {})
+        if el.get("type") == "relation" and want_routes:
+            name = tags.get("name") or tags.get("ref") or "Unnamed route %d" % el["id"]
+            walks.append(make_light(el["id"], "osm-route", name, {"kind": "relation"}, tags,
+                                    centre=((b["minlat"] + b["maxlat"]) / 2, (b["minlon"] + b["maxlon"]) / 2)))
+        elif el.get("type") == "way" and want_paths:
+            name = (tags.get("name") or "").strip()
+            if not name or name.lower() in GENERIC_NAMES:
+                continue
+            g = groups.setdefault(name, {"tags": {}, "diag": 0.0, "b": [90.0, 180.0, -90.0, -180.0]})
+            g["diag"] += haversine_m((b["minlat"], b["minlon"]), (b["maxlat"], b["maxlon"])) / 1000.0
+            g["b"] = [min(g["b"][0], b["minlat"]), min(g["b"][1], b["minlon"]),
+                      max(g["b"][2], b["maxlat"]), max(g["b"][3], b["maxlon"])]
+            for k, v in tags.items():
+                g["tags"].setdefault(k, v)
+    for name, g in groups.items():
+        est = g["diag"] * 1.15            # straight-line sizes underestimate; the exact length comes on click
+        if est < MIN_PATH_KM:
+            continue
+        clat, clon = (g["b"][0] + g["b"][2]) / 2, (g["b"][1] + g["b"][3]) / 2
+        wid = PATH_BASE + zlib.crc32(("%s|%.2f|%.2f" % (name, clat, clon)).encode("utf-8"))
+        pad = 0.002
+        recipe = {"kind": "path", "name": name, "bbox": [g["b"][0] - pad, g["b"][1] - pad, g["b"][2] + pad, g["b"][3] + pad]}
+        walks.append(make_light(wid, "osm-path", name, recipe, g["tags"], est, True, (clat, clon)))
     return walks
 
 
-def search_doc(s, w, n, e):
-    params = {
-        "where": "1=1", "geometry": "%f,%f,%f,%f" % (w, s, e, n),
-        "geometryType": "esriGeometryEnvelope", "inSR": 4326,
-        "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "outSR": 4326,
-        "resultRecordCount": MAX_RESULTS, "f": "geojson",
-    }
+def _arcgis_get(url, params, label):
     try:
-        r = requests.get(DOC_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=25)
+        r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=25)
         data = r.json()
     except (requests.RequestException, ValueError) as ex:
-        raise RuntimeError(_short_error(DOC_URL, ex))
+        raise RuntimeError(_short_error(url, ex))
     if r.status_code != 200 or "error" in data:
-        raise RuntimeError("DOC service error: %s" % (data.get("error", {}).get("message") or r.status_code))
-    return parse_doc(data)
+        raise RuntimeError("%s error: %s" % (label, (data.get("error") or {}).get("message") or r.status_code))
+    return data
 
 
-def search_nz(s, w, n, e):
+def list_doc(s, w, n, e):
     params = {
-        "where": "Walk IN (1,2,3,4,5,6,98) AND (Status IS NULL OR Status NOT IN ('Decommisioned','Proposed'))",
-        "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
-        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "outSR": 4326,
-        "resultRecordCount": 2000, "f": "geojson",
+        "where": "1=1", "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
+        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "false",
+        "outFields": "OBJECTID,name,introduction,difficulty,completionTime,region,"
+                     "walkingAndTrampingWebPage,staticLink,Shape__Length",
+        "resultRecordCount": MAX_RESULTS, "f": "json",
     }
-    try:
-        r = requests.get(NZT_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=25)
-        data = r.json()
-    except (requests.RequestException, ValueError) as ex:
-        raise RuntimeError(_short_error(NZT_URL, ex))
-    if r.status_code != 200 or "error" in data:
-        raise RuntimeError("service error: %s" % (data.get("error", {}).get("message") or r.status_code))
-    return parse_nz_tracks(data)
+    walks = []
+    for f in _arcgis_get(DOC_URL, params, "DOC").get("features", []):
+        p = _props(f)
+        if p.get("objectid") is None:
+            continue
+        oid = int(p["objectid"])
+        walks.append(make_light(
+            DOC_BASE + oid, "doc", p.get("name") or "DOC track", {"kind": "doc", "oid": oid},
+            {"operator": "Department of Conservation"}, _km(p), False, None,
+            description=p.get("introduction"), difficulty=p.get("difficulty"), time_text=p.get("completiontime"),
+            region=p.get("region"), link=p.get("walkingandtrampingwebpage") or p.get("staticlink")))
+    return walks
+
+
+NZ_WHERE = "Walk IN (1,2,3,4,5,6,98) AND (Status IS NULL OR Status NOT IN ('Decommisioned','Proposed'))"
+
+
+def _nz_summary(props):
+    def first(key):
+        for pr in props:
+            v = pr.get(key)
+            if v not in (None, "", "Unknown"):
+                return v
+        return None
+    grades = [pr.get("walk") for pr in props if pr.get("walk") in WALK_GRADE]
+    facts = []
+    dog = first("dogaccess")
+    if dog in DOG_TEXT:
+        facts.append("Dogs: %s." % DOG_TEXT[dog])
+    if first("mobilityaccess") == "Yes":
+        facts.append("Suitable for mobility access.")
+    return {"difficulty": WALK_GRADE[max(grades)] if grades else None,
+            "description": " ".join(x for x in [first("description"), " ".join(facts)] if x) or None,
+            "link": first("weblink"), "region": first("locality") or first("localauthority"),
+            "operator": first("managedby"), "authority": first("localauthority")}
+
+
+def nz_light_id(name, authority):
+    return NZT_BASE + zlib.crc32(("%s|%s" % (name, authority or "")).lower().encode("utf-8"))
+
+
+def list_nz(s, w, n, e):
+    params = {
+        "where": NZ_WHERE, "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
+        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "false",
+        "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,"
+                     "DogAccess,MobilityAccess,ManagedBy,Shape__Length",
+        "resultRecordCount": 2000, "f": "json",
+    }
+    groups = {}
+    for f in _arcgis_get(NZT_URL, params, "NZ tracks").get("features", []):
+        p = _props(f)
+        name = str(p.get("name") or p.get("maintrail") or "").strip()
+        if not name or name.lower() in GENERIC_NAMES:
+            continue
+        key = (name.lower(), str(p.get("localauthority") or "").lower())
+        g = groups.setdefault(key, {"name": name, "props": [], "km": 0.0, "known": False})
+        g["props"].append(p)
+        km = _km(p)
+        if km:
+            g["km"] += km
+            g["known"] = True
+    walks = []
+    for g in groups.values():
+        dist = g["km"] if g["known"] else None
+        if dist is not None and dist < MIN_TRACK_KM:
+            continue
+        sm = _nz_summary(g["props"])
+        walks.append(make_light(
+            nz_light_id(g["name"], sm["authority"]), "nz-track", g["name"],
+            {"kind": "nz", "name": g["name"], "bbox": [s, w, n, e]}, {"operator": sm["operator"]},
+            dist, False, None, description=sm["description"], difficulty=sm["difficulty"],
+            link=sm["link"], region=sm["region"]))
+    return walks
 
 
 def overlaps_nz(s, w, n, e):
@@ -500,22 +613,22 @@ def overlaps_nz(s, w, n, e):
 
 
 def search_all(s, w, n, e, sources):
-    walks, problems = [], []
+    """Fetch the light lists from every chosen source at the same time."""
+    jobs = []
     if "routes" in sources or "paths" in sources:
-        try:
-            walks += search_osm(s, w, n, e, "routes" in sources, "paths" in sources)
-        except RuntimeError as ex:
-            problems.append("OpenStreetMap: %s" % ex)
+        jobs.append(("OpenStreetMap", lambda: list_osm(s, w, n, e, "routes" in sources, "paths" in sources)))
     if "doc" in sources and overlaps_nz(s, w, n, e):
-        try:
-            walks += search_doc(s, w, n, e)
-        except RuntimeError as ex:
-            problems.append("DOC: %s" % ex)
+        jobs.append(("DOC", lambda: list_doc(s, w, n, e)))
     if "nz" in sources and overlaps_nz(s, w, n, e):
-        try:
-            walks += search_nz(s, w, n, e)
-        except RuntimeError as ex:
-            problems.append("NZ tracks: %s" % ex)
+        jobs.append(("NZ tracks", lambda: list_nz(s, w, n, e)))
+    walks, problems = [], []
+    with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
+        futures = [(label, pool.submit(fn)) for label, fn in jobs]
+        for label, fut in futures:
+            try:
+                walks += fut.result()
+            except RuntimeError as ex:
+                problems.append("%s: %s" % (label, ex))
     # Prefer curated sources: drop duplicates of the same name from less curated ones.
     doc_names = {x["name"].lower() for x in walks if x["source"] == "doc"}
     walks = [x for x in walks if not (x["source"] == "nz-track" and x["name"].lower() in doc_names)]
@@ -523,11 +636,85 @@ def search_all(s, w, n, e, sources):
     walks = [x for x in walks if not (x["source"] == "osm-path" and x["name"].lower() in curated)]
     with _cache_lock:
         for wk in walks:
-            _cache[wk["osm_id"]] = wk
+            old = _cache.get(wk["osm_id"])
+            if not (old and old.get("chains")):          # keep a route that was already loaded
+                _cache[wk["osm_id"]] = wk
         if len(_cache) > 3000:
             for k in list(_cache)[:1500]:
                 _cache.pop(k, None)
     return walks, problems
+
+
+def _esc_sql(v):
+    return str(v).replace("'", "''")
+
+
+def load_detail(wk):
+    """Fetch the full route for one search result (on click or when adding it to the box)."""
+    rec = wk.get("recipe") or {}
+    kind = rec.get("kind")
+    full = None
+    if kind == "relation":
+        got = fetch_relations_by_ids([wk["osm_id"]])
+        full = got[0] if got else None
+    elif kind == "path":
+        b = rec["bbox"]
+        nm = rec["name"].replace("\\", "\\\\").replace('"', '\\"')
+        q = ('[out:json][timeout:30];way["highway"~"^(%s)$"]["name"="%s"](%f,%f,%f,%f);out tags geom;'
+             % (PATH_HIGHWAYS, nm, b[0], b[1], b[2], b[3]))
+        got = [x for x in group_named_paths(overpass(q).get("elements", []), min_km=0) if x["name"] == rec["name"]]
+        full = got[0] if got else None
+    elif kind == "doc":
+        data = _arcgis_get(DOC_URL, {"where": "OBJECTID=%d" % int(rec["oid"]), "outFields": "*", "outSR": 4326,
+                                      "returnGeometry": "true", "f": "geojson"}, "DOC")
+        got = parse_doc(data)
+        full = got[0] if got else None
+    elif kind == "nz":
+        b, nm = rec["bbox"], _esc_sql(rec["name"])
+        data = _arcgis_get(NZT_URL, {
+            "where": "(Name='%s' OR MainTrail='%s') AND %s" % (nm, nm, NZ_WHERE),
+            "geometry": "%f,%f,%f,%f" % (b[1], b[0], b[3], b[2]), "geometryType": "esriGeometryEnvelope",
+            "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "outSR": 4326,
+            "resultRecordCount": 2000, "f": "geojson"}, "NZ tracks")
+        got = [x for x in parse_nz_tracks(data) if x["name"].lower() == rec["name"].lower()]
+        full = got[0] if got else None
+    if not full:
+        raise RuntimeError("Could not load the route for \"%s\". The source may have changed; search again." % wk["name"])
+    full["osm_id"] = wk["osm_id"]           # keep the id the list used
+    full["recipe"] = rec
+    for k in ("description", "link", "region", "difficulty", "time_text"):
+        if not full.get(k) and wk.get(k):
+            full[k] = wk[k]
+    with _cache_lock:
+        _cache[wk["osm_id"]] = full
+    return full
+
+
+def main_chain(osm_id):
+    """The longest track of a walk, from the box or from the search cache (loading it if needed)."""
+    row = db().execute("SELECT geom FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
+    if row:
+        return json.loads(row["geom"])[0], True
+    with _cache_lock:
+        wk = _cache.get(osm_id)
+    if not wk:
+        abort(404)
+    if not wk.get("chains"):
+        wk = load_detail(wk)                              # may raise RuntimeError
+    return wk["chains"][0], False
+
+
+def ensure_details(found):
+    """Make sure every walk in the dict {id: walk} has its route, batching relation lookups."""
+    need = [wk for wk in found.values() if not wk.get("chains")]
+    rel = [wk["osm_id"] for wk in need if (wk.get("recipe") or {}).get("kind") == "relation"]
+    if rel:
+        for full in fetch_relations_by_ids(rel):
+            full["recipe"] = {"kind": "relation"}
+            found[full["osm_id"]] = full
+    for wk in need:
+        if (wk.get("recipe") or {}).get("kind") != "relation":
+            found[wk["osm_id"]] = load_detail(wk)
 
 
 def fetch_relations_by_ids(ids):
@@ -611,21 +798,22 @@ def safe_filename(name, osm_id):
 def public(walk, added=False, preview=True):
     """Shape a walk dict or DB row (as dict) for the browser."""
     ascent = walk.get("ascent_m")
-    mins = est_minutes(walk["distance_km"], ascent)
+    dist = walk.get("distance_km")
+    mins = est_minutes(dist, ascent) if dist else None
     d = {
         "osm_id": walk["osm_id"], "name": walk["name"], "ref": walk.get("ref"),
         "network": walk.get("network"), "operator": walk.get("operator"),
-        "description": walk.get("description"), "distance_km": walk["distance_km"],
+        "description": walk.get("description"), "distance_km": dist, "approx": bool(walk.get("approx")),
         "lat": walk.get("lat"), "lon": walk.get("lon"), "added": added,
         "source": walk.get("source") or "osm-route",
         "source_label": SOURCE_LABEL.get(walk.get("source") or "osm-route", "OSM"),
         "difficulty": walk.get("difficulty"), "route_type": walk.get("route_type"),
         "ascent_m": ascent, "link": walk.get("link"), "region": walk.get("region"),
-        "time_text": walk.get("time_text") or ("about " + fmt_minutes(mins)),
+        "time_text": walk.get("time_text") or (("about " + fmt_minutes(mins)) if mins else None),
         "place": walk.get("place"), "added_at": walk.get("added_at"),
         "my_rating": walk.get("my_rating"), "my_note": walk.get("my_note"),
     }
-    if preview:
+    if preview and walk.get("chains"):
         d["line"] = [simplify(c) for c in walk["chains"][:20]]
     return d
 
@@ -662,7 +850,7 @@ def api_search():
         return jsonify(error="Could not search: " + " | ".join(problems)), 502
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
     order = {"doc": 0, "nz-track": 1, "osm-route": 2, "osm-path": 3}
-    walks.sort(key=lambda x: (order.get(x["source"], 9), -x["distance_km"]))
+    walks.sort(key=lambda x: (order.get(x["source"], 9), -(x["distance_km"] or 0)))
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks],
                    warnings=problems, capped=len(walks) >= MAX_RESULTS)
 
@@ -688,6 +876,10 @@ def api_add():
                 found[wk["osm_id"]] = wk
         except RuntimeError as ex:
             return jsonify(error="OpenStreetMap server problem: %s" % ex), 502
+    try:
+        ensure_details(found)
+    except RuntimeError as ex:
+        return jsonify(error="Could not fetch the route: %s" % ex), 502
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn = db()
     existing = {r["osm_id"] for r in conn.execute(
@@ -711,6 +903,29 @@ def api_add():
         added += cur.rowcount
     conn.commit()
     return jsonify(added=added, skipped=len(ids) - added)
+
+
+@app.post("/api/detail")
+def api_detail():
+    try:
+        wid = int((request.get_json(silent=True) or {}).get("id"))
+    except (TypeError, ValueError):
+        return jsonify(error="id must be a number"), 400
+    row = db().execute("SELECT * FROM walks WHERE osm_id=?", (wid,)).fetchone()
+    if row:
+        d = dict(row)
+        d["chains"] = json.loads(d["geom"])
+        return jsonify(public(d, True))
+    with _cache_lock:
+        wk = _cache.get(wid)
+    if not wk:
+        return jsonify(error="That result has expired. Search the area again."), 409
+    if not wk.get("chains"):
+        try:
+            wk = load_detail(wk)
+        except RuntimeError as ex:
+            return jsonify(error=str(ex)), 502
+    return jsonify(public(wk, False))
 
 
 @app.get("/api/library")
@@ -895,6 +1110,196 @@ def api_route():
 
 
 # --------------------------------------------------------------------------
+# Weather (Open-Meteo, free) and nearby places (OpenStreetMap)
+# --------------------------------------------------------------------------
+WMO = {0: ("Clear sky", "☀️"), 1: ("Mainly clear", "🌤️"), 2: ("Partly cloudy", "⛅"), 3: ("Overcast", "☁️"),
+       45: ("Fog", "🌫️"), 48: ("Freezing fog", "🌫️"), 51: ("Light drizzle", "🌦️"), 53: ("Drizzle", "🌦️"),
+       55: ("Heavy drizzle", "🌧️"), 56: ("Freezing drizzle", "🌧️"), 57: ("Freezing drizzle", "🌧️"),
+       61: ("Light rain", "🌦️"), 63: ("Rain", "🌧️"), 65: ("Heavy rain", "🌧️"), 66: ("Freezing rain", "🌧️"),
+       67: ("Freezing rain", "🌧️"), 71: ("Light snow", "🌨️"), 73: ("Snow", "🌨️"), 75: ("Heavy snow", "❄️"),
+       77: ("Snow grains", "🌨️"), 80: ("Light showers", "🌦️"), 81: ("Showers", "🌧️"), 82: ("Heavy showers", "⛈️"),
+       85: ("Snow showers", "🌨️"), 86: ("Heavy snow showers", "❄️"), 95: ("Thunderstorm", "⛈️"),
+       96: ("Thunderstorm with hail", "⛈️"), 99: ("Thunderstorm with hail", "⛈️")}
+
+
+def wmo(code):
+    return WMO.get(code, ("Unknown", "❔"))
+
+
+def fetch_weather(lat, lon):
+    key = (round(lat, 2), round(lon, 2))
+    now = time.time()
+    hit = _weather_cache.get(key)
+    if hit and now - hit[0] < 600:
+        return hit[1]
+    params = {
+        "latitude": "%.4f" % lat, "longitude": "%.4f" % lon, "timezone": "auto", "forecast_days": 3,
+        "wind_speed_unit": "kmh",
+        "current": "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_gusts_10m,is_day",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,"
+                 "precipitation_sum,wind_speed_10m_max,uv_index_max,sunrise,sunset",
+    }
+    try:
+        r = requests.get(WEATHER_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=15)
+        data = r.json()
+    except (requests.RequestException, ValueError) as ex:
+        raise RuntimeError(_short_error(WEATHER_URL, ex))
+    if r.status_code != 200 or "current" not in data:
+        raise RuntimeError("The weather service did not return a forecast.")
+    cur, daily = data["current"], data.get("daily") or {}
+    text, icon = wmo(cur.get("weather_code"))
+    out = {"now": {"temp": cur.get("temperature_2m"), "feels": cur.get("apparent_temperature"),
+                   "rain_mm": cur.get("precipitation"), "wind": cur.get("wind_speed_10m"),
+                   "gust": cur.get("wind_gusts_10m"), "text": text, "icon": icon, "is_day": cur.get("is_day")},
+           "days": [], "attribution": "Weather data by Open-Meteo.com"}
+    dates = daily.get("time") or []
+    for i, d in enumerate(dates):
+        def at(k, i=i):
+            v = daily.get(k) or []
+            return v[i] if i < len(v) else None
+        t, ic = wmo(at("weather_code"))
+        out["days"].append({
+            "date": d, "text": t, "icon": ic, "tmax": at("temperature_2m_max"), "tmin": at("temperature_2m_min"),
+            "rain_prob": at("precipitation_probability_max"), "rain_mm": at("precipitation_sum"),
+            "wind_max": at("wind_speed_10m_max"), "uv": at("uv_index_max"),
+            "sunrise": (at("sunrise") or "")[-5:] or None, "sunset": (at("sunset") or "")[-5:] or None})
+    _weather_cache[key] = (now, out)
+    if len(_weather_cache) > 500:
+        _weather_cache.clear()
+    return out
+
+
+@app.get("/api/weather")
+def api_weather():
+    try:
+        lat, lon = request.args.get("lat", type=float), request.args.get("lon", type=float)
+        if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError
+    except ValueError:
+        return jsonify(error="lat and lon are required"), 400
+    if not rate_ok("weather", 60):
+        return jsonify(error="Too many weather lookups just now. Try again in a minute."), 429
+    try:
+        return jsonify(fetch_weather(lat, lon))
+    except RuntimeError as ex:
+        return jsonify(error="Weather unavailable: %s" % ex), 502
+
+
+# kind -> (label, icon, how far from the route it may be, in metres)
+PLACE_KINDS = {
+    "food": ("Food and coffee", "☕", 250), "water": ("Drinking water", "💧", 120),
+    "toilets": ("Toilets", "🚻", 120), "rest": ("Rest spots", "🪑", 60), "view": ("Viewpoints", "👀", 120),
+}
+FOOD_AMENITIES = {"cafe": "Café", "restaurant": "Restaurant", "fast_food": "Takeaway", "food_court": "Food court",
+                  "ice_cream": "Ice cream", "pub": "Pub", "bar": "Bar"}
+
+
+def classify_place(tags):
+    am, shop = tags.get("amenity"), tags.get("shop")
+    if am in FOOD_AMENITIES:
+        return "food", FOOD_AMENITIES[am]
+    if shop in ("bakery", "convenience", "supermarket"):
+        return "food", {"bakery": "Bakery", "convenience": "Dairy / convenience store", "supermarket": "Supermarket"}[shop]
+    if am == "drinking_water":
+        return "water", "Drinking water"
+    if am == "toilets":
+        return "toilets", "Toilets"
+    if am == "shelter":
+        return "rest", "Shelter"
+    if am == "bench":
+        return "rest", "Bench"
+    if tags.get("leisure") == "picnic_table" or tags.get("tourism") == "picnic_site":
+        return "rest", "Picnic spot"
+    if tags.get("tourism") == "viewpoint":
+        return "view", "Viewpoint"
+    return None, None
+
+
+def along_and_off(lat, lon, chain, cum):
+    """Nearest point on a route: (metres along from the start, metres away from the line)."""
+    kx, ky = math.cos(math.radians(lat)) * 111320.0, 110540.0
+    best_off, best_along = float("inf"), 0.0
+    for i in range(len(chain) - 1):
+        ax, ay = (chain[i][1] - lon) * kx, (chain[i][0] - lat) * ky
+        bx, by = (chain[i + 1][1] - lon) * kx, (chain[i + 1][0] - lat) * ky
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, -(ax * dx + ay * dy) / l2)) if l2 else 0.0
+        off = math.hypot(ax + t * dx, ay + t * dy)
+        if off < best_off:
+            best_off, best_along = off, cum[i] + t * (cum[i + 1] - cum[i])
+    return best_along, best_off
+
+
+def fetch_places(chain):
+    """Food, water, toilets, rest spots and viewpoints near a route, from OpenStreetMap."""
+    ch = simplify(chain, 400)
+    pad = 0.0025
+    s_, n_ = min(p[0] for p in ch) - pad, max(p[0] for p in ch) + pad
+    w_, e_ = min(p[1] for p in ch) - pad, max(p[1] for p in ch) + pad
+    bb = "(%f,%f,%f,%f)" % (s_, w_, n_, e_)
+    q = ("[out:json][timeout:25];("
+         'nwr["amenity"~"^(cafe|restaurant|fast_food|food_court|ice_cream|pub|bar|drinking_water|toilets|shelter|bench)$"]%s;'
+         'nwr["leisure"="picnic_table"]%s;nwr["tourism"~"^(picnic_site|viewpoint)$"]%s;'
+         'nwr["shop"~"^(bakery|convenience|supermarket)$"]%s;);out tags center 1500;' % (bb, bb, bb, bb))
+    cum = [0.0]
+    for i in range(1, len(ch)):
+        cum.append(cum[-1] + haversine_m(ch[i - 1], ch[i]))
+    total_km = cum[-1] / 1000.0
+    out, seen = [], set()
+    for el in overpass(q).get("elements", []):
+        tags = el.get("tags", {})
+        kind, label = classify_place(tags)
+        if not kind:
+            continue
+        lat = el.get("lat") if el.get("lat") is not None else (el.get("center") or {}).get("lat")
+        lon = el.get("lon") if el.get("lon") is not None else (el.get("center") or {}).get("lon")
+        if lat is None or lon is None:
+            continue
+        along, off = along_and_off(lat, lon, ch, cum)
+        if off > PLACE_KINDS[kind][2]:
+            continue
+        key = (el.get("type"), el.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": kind, "label": label, "name": tags.get("name"), "lat": round(lat, 6), "lon": round(lon, 6),
+                    "off_m": int(round(off)), "along_km": round(along / 1000.0, 2),
+                    "hours": tags.get("opening_hours"), "website": tags.get("website") or tags.get("contact:website")})
+    out.sort(key=lambda x: x["along_km"])
+    per_kind = {}
+    trimmed = []
+    for pl in out:                      # keep the list readable: at most 40 of each kind
+        per_kind[pl["kind"]] = per_kind.get(pl["kind"], 0) + 1
+        if per_kind[pl["kind"]] <= 40:
+            trimmed.append(pl)
+    counts = {k: sum(1 for x in out if x["kind"] == k) for k in PLACE_KINDS}
+    return {"places": trimmed, "counts": counts, "total_km": round(total_km, 2),
+            "kinds": {k: {"label": v[0], "icon": v[1]} for k, v in PLACE_KINDS.items()}}
+
+
+@app.get("/api/walks/<int:osm_id>/places")
+def api_places(osm_id):
+    hit = _places_cache.get(osm_id)
+    if hit and time.time() - hit[0] < 3600:
+        return jsonify(hit[1])
+    try:
+        chain, _ = main_chain(osm_id)
+    except RuntimeError as ex:
+        return jsonify(error=str(ex)), 502
+    if not rate_ok("places", 20):
+        return jsonify(error="Too many lookups just now. Try again in a minute."), 429
+    try:
+        res = fetch_places(chain)
+    except RuntimeError as ex:
+        return jsonify(error="Nearby places unavailable: %s" % ex), 502
+    _places_cache[osm_id] = (time.time(), res)
+    if len(_places_cache) > 300:
+        _places_cache.clear()
+    return jsonify(res)
+
+
+# --------------------------------------------------------------------------
 # Photos (Wikimedia Commons, free, no key) and personal rating/notes
 # --------------------------------------------------------------------------
 def rate_ok(kind, limit):
@@ -1014,24 +1419,20 @@ def build_profile(chain):
 
 @app.get("/api/walks/<int:osm_id>/profile")
 def api_profile(osm_id):
-    row = db().execute("SELECT geom, profile FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
+    row = db().execute("SELECT profile FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
     if row and row["profile"]:
         return jsonify(json.loads(row["profile"]))
-    if row:
-        chain = json.loads(row["geom"])[0]
-    else:
-        with _cache_lock:
-            wk = _cache.get(osm_id)
-        if not wk:
-            abort(404)
-        chain = wk["chains"][0]
+    try:
+        chain, in_box = main_chain(osm_id)
+    except RuntimeError as ex:
+        return jsonify(error=str(ex)), 502
     if not rate_ok("profile", 60):
         return jsonify(error="Too many elevation lookups just now. Try again in a minute."), 429
     try:
         prof = build_profile(chain)
     except RuntimeError as ex:
         return jsonify(error="Elevation profile unavailable: %s" % ex), 502
-    if row:
+    if in_box:
         conn = db()
         conn.execute("UPDATE walks SET profile=? WHERE osm_id=?", (json.dumps(prof), osm_id))
         conn.commit()
