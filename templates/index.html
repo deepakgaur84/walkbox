@@ -312,6 +312,7 @@ function render() {
       gb.onclick = e => { e.stopPropagation(); togglePanel(r, gb, panel); };
       body.append(gb, panel);
     }
+    { const at = document.createElement('a'); at.href = 'https://www.alltrails.com/search?q=' + encodeURIComponent(r.name + (r.region ? ' ' + r.region : '')); at.target = '_blank'; at.rel = 'noopener'; at.textContent = 'Find on AllTrails ↗'; at.style.cssText = 'font-size:13px;margin-left:10px'; at.onclick = e => e.stopPropagation(); body.appendChild(at); }
     if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
     if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
     item.appendChild(body);
