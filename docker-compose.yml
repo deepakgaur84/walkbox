@@ -1,0 +1,17 @@
+services:
+  walkbox:
+    # Builds straight from this repo, so no code folder is needed on the NAS.
+    build:
+      context: https://github.com/deepakgaur84/walkbox.git#main
+    image: walkbox:latest
+    container_name: walkbox
+    volumes:
+      # The only persistent folder: holds walkbox.db. Must exist before deploy.
+      - /volume1/docker/walkbox/data:/data
+    ports:
+      - "8095:8080"
+    environment:
+      DB_PATH: /data/walkbox.db
+      MAX_SPAN_DEG: "0.5"
+      MAX_RESULTS: "150"
+    restart: unless-stopped

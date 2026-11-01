@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walkbox</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#f6f7f4; --card:#fff; --ink:#1f2a24; --mute:#68746c; --brand:#2f6f4f; --brand2:#e9f2ec; --line:#dfe4de; --warn:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--ink); background:var(--bg); height:100vh; display:flex; flex-direction:column; }
+  header { background:var(--brand); color:#fff; padding:10px 16px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  nav button { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.5); padding:6px 14px; border-radius:20px; cursor:pointer; font-size:14px; }
+  nav button.active { background:#fff; color:var(--brand); }
+  main { flex:1; display:flex; min-height:0; }
+  #side { width:420px; max-width:45vw; display:flex; flex-direction:column; background:var(--card); border-right:1px solid var(--line); min-height:0; }
+  #map { flex:1; }
+  .tools { padding:10px; border-bottom:1px solid var(--line); display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .tools input[type=text], .tools input[type=number], .tools select { padding:7px 9px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+  .tools input[type=text] { flex:1; min-width:120px; }
+  .tools input[type=number] { width:70px; }
+  button.b { background:var(--brand); color:#fff; border:0; padding:8px 12px; border-radius:6px; cursor:pointer; font-size:14px; }
+  button.b.alt { background:var(--brand2); color:var(--brand); }
+  button.b:disabled { opacity:.5; cursor:default; }
+  #status { padding:8px 12px; font-size:13px; color:var(--mute); border-bottom:1px solid var(--line); min-height:34px; }
+  #status.err { color:var(--warn); }
+  #list { overflow:auto; flex:1; }
+  .item { padding:10px 12px; border-bottom:1px solid var(--line); display:flex; gap:10px; cursor:pointer; }
+  .item:hover, .item.sel { background:var(--brand2); }
+  .item .t { font-weight:600; }
+  .item .m { font-size:13px; color:var(--mute); }
+  .item .d { font-size:13px; margin-top:2px; }
+  .badge { font-size:11px; background:var(--brand2); color:var(--brand); padding:1px 7px; border-radius:10px; margin-left:6px; }
+  .acts { display:flex; flex-direction:column; gap:4px; align-items:flex-end; }
+  .acts a, .acts button { font-size:13px; }
+  a.dl { background:var(--brand); color:#fff; padding:5px 10px; border-radius:6px; text-decoration:none; white-space:nowrap; }
+  button.del { background:none; border:0; color:var(--warn); cursor:pointer; padding:0; }
+  .foot { padding:6px 10px; font-size:11px; color:var(--mute); border-top:1px solid var(--line); }
+  @media (max-width:800px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:55vh; } #map { height:45vh; flex:none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥾 Walkbox</h1>
+  <nav>
+    <button id="tabFind" class="active">Find walks</button>
+    <button id="tabBox">My walk box</button>
+  </nav>
+</header>
+<main>
+  <section id="side">
+    <div id="findTools" class="tools">
+      <input type="text" id="place" placeholder="Go to a place, e.g. Queenstown">
+      <button class="b alt" id="goBtn">Go</button>
+      <button class="b" id="searchBtn" style="width:100%">Find walks in this map view</button>
+    </div>
+    <div id="boxTools" class="tools" style="display:none">
+      <input type="text" id="q" placeholder="Search your walks (name, place, operator…)">
+      <input type="number" id="minKm" placeholder="min km" min="0" step="0.5">
+      <input type="number" id="maxKm" placeholder="max km" min="0" step="0.5">
+      <select id="sort">
+        <option value="added">Newest added</option>
+        <option value="name">Name A–Z</option>
+        <option value="longest">Longest</option>
+        <option value="shortest">Shortest</option>
+      </select>
+      <button class="b alt" id="zipBtn">Download all (.zip)</button>
+    </div>
+    <div id="findActions" class="tools" style="display:none">
+      <button class="b" id="addSelBtn">Add selected to my box</button>
+      <button class="b alt" id="selAllBtn">Select all</button>
+    </div>
+    <div id="status">Move the map to an area, then press “Find walks in this map view”.</div>
+    <div id="list"></div>
+    <div class="foot">Route data © OpenStreetMap contributors (ODbL). Check conditions before you walk.</div>
+  </section>
+  <div id="map"></div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const MAX_SPAN = {{ max_span }};
+let mode = 'find';
+let results = [];
+const selected = new Set();
+const map = L.map('map').setView([-41.3, 174.8], 11);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 18, attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+const layerGroup = L.layerGroup().addTo(map);
+let lines = {};
+
+const $ = id => document.getElementById(id);
+function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
+
+function setMode(m) {
+  mode = m;
+  $('tabFind').classList.toggle('active', m === 'find');
+  $('tabBox').classList.toggle('active', m === 'box');
+  $('findTools').style.display = m === 'find' ? '' : 'none';
+  $('findActions').style.display = m === 'find' && results.length ? '' : 'none';
+  $('boxTools').style.display = m === 'box' ? '' : 'none';
+  results = []; selected.clear(); render(); layerGroup.clearLayers();
+  if (m === 'box') loadBox(); else status('Move the map to an area, then press “Find walks in this map view”.');
+}
+$('tabFind').onclick = () => setMode('find');
+$('tabBox').onclick = () => setMode('box');
+
+async function post(url, body) {
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('Request failed (' + r.status + ')'));
+  return j;
+}
+
+// ---- Go to place (Nominatim, from the browser) ----
+async function goPlace() {
+  const q = $('place').value.trim(); if (!q) return;
+  status('Looking up place…');
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const j = await r.json();
+    if (!j.length) { status('Place not found.', true); return; }
+    const bb = j[0].boundingbox.map(Number); // s, n, w, e
+    map.fitBounds([[bb[0], bb[2]], [bb[1], bb[3]]], {maxZoom: 13});
+    status('Moved to ' + j[0].display_name + '. Now press “Find walks in this map view”.');
+    window._place = j[0].display_name.split(',').slice(0, 2).join(',').trim();
+  } catch (e) { status('Place lookup failed: ' + e.message, true); }
+}
+$('goBtn').onclick = goPlace;
+$('place').addEventListener('keydown', e => { if (e.key === 'Enter') goPlace(); });
+
+// ---- Find ----
+$('searchBtn').onclick = async () => {
+  const b = map.getBounds();
+  if ((b.getNorth() - b.getSouth()) > MAX_SPAN || (b.getEast() - b.getWest()) > MAX_SPAN) {
+    status('Zoom in a bit: the map view is too large to search.', true); return;
+  }
+  $('searchBtn').disabled = true; status('Searching OpenStreetMap…');
+  try {
+    const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast()});
+    results = j.results; selected.clear();
+    status(results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '.' : 'No walking routes found here. Try another area.');
+    $('findActions').style.display = results.length ? '' : 'none';
+    render();
+  } catch (e) { status(e.message, true); }
+  $('searchBtn').disabled = false;
+};
+
+$('selAllBtn').onclick = () => { results.filter(r => !r.added).forEach(r => selected.add(r.osm_id)); render(); };
+$('addSelBtn').onclick = async () => {
+  if (!selected.size) { status('Tick the walks you want first.', true); return; }
+  $('addSelBtn').disabled = true; status('Adding…');
+  try {
+    const j = await post('/api/walks', {ids:[...selected], place: window._place || null});
+    results.forEach(r => { if (selected.has(r.osm_id)) r.added = true; });
+    selected.clear(); render();
+    status(j.added + ' walk(s) added to your box. Open “My walk box” to download them.');
+  } catch (e) { status(e.message, true); }
+  $('addSelBtn').disabled = false;
+};
+
+// ---- Box ----
+async function loadBox() {
+  const p = new URLSearchParams({q:$('q').value, sort:$('sort').value});
+  if ($('minKm').value) p.set('min_km', $('minKm').value);
+  if ($('maxKm').value) p.set('max_km', $('maxKm').value);
+  try {
+    const r = await fetch('/api/library?' + p); const j = await r.json();
+    results = j.results; render();
+    status(results.length + ' walk(s) in your box.');
+    $('zipBtn').disabled = !results.length;
+  } catch (e) { status('Could not load the box: ' + e.message, true); }
+}
+let t; ['q','minKm','maxKm','sort'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(t); t = setTimeout(loadBox, 250); }));
+$('zipBtn').onclick = () => { location.href = '/walks.zip?ids=' + results.map(r => r.osm_id).join(','); };
+
+async function del(id) {
+  if (!confirm('Remove this walk from your box?')) return;
+  await fetch('/api/walks/' + id, {method:'DELETE'}); loadBox();
+}
+
+// ---- Rendering ----
+function render() {
+  const list = $('list'); list.textContent = '';
+  layerGroup.clearLayers(); lines = {};
+  const all = [];
+  results.forEach(r => {
+    const item = document.createElement('div'); item.className = 'item'; item.id = 'w' + r.osm_id;
+    if (mode === 'find' && !r.added) {
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = selected.has(r.osm_id);
+      cb.onclick = e => { e.stopPropagation(); cb.checked ? selected.add(r.osm_id) : selected.delete(r.osm_id); };
+      item.appendChild(cb);
+    }
+    const body = document.createElement('div'); body.style.flex = '1';
+    const t = document.createElement('div'); t.className = 't'; t.textContent = r.name;
+    if (r.added && mode === 'find') { const bd = document.createElement('span'); bd.className = 'badge'; bd.textContent = 'in box'; t.appendChild(bd); }
+    const m = document.createElement('div'); m.className = 'm';
+    m.textContent = [r.distance_km.toFixed(1) + ' km', r.ref && ('ref ' + r.ref), r.network, r.operator, r.place].filter(Boolean).join(' · ');
+    body.append(t, m);
+    if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
+    item.appendChild(body);
+    if (r.added) {
+      const acts = document.createElement('div'); acts.className = 'acts';
+      const a = document.createElement('a'); a.className = 'dl'; a.href = '/walks/' + r.osm_id + '.gpx'; a.textContent = 'Download GPX';
+      a.onclick = e => e.stopPropagation(); acts.appendChild(a);
+      if (mode === 'box') { const b = document.createElement('button'); b.className = 'del'; b.textContent = 'Remove'; b.onclick = e => { e.stopPropagation(); del(r.osm_id); }; acts.appendChild(b); }
+      item.appendChild(acts);
+    }
+    item.onclick = () => focus(r.osm_id);
+    list.appendChild(item);
+    const pl = L.polyline(r.line, {color: r.added ? '#2f6f4f' : '#d2691e', weight: 4, opacity: .8})
+      .bindTooltip(r.name).on('click', () => focus(r.osm_id)).addTo(layerGroup);
+    lines[r.osm_id] = pl; all.push(pl);
+  });
+  if (mode === 'box' && all.length) map.fitBounds(L.featureGroup(all).getBounds(), {padding:[30,30], maxZoom: 14});
+}
+function focus(id) {
+  document.querySelectorAll('.item').forEach(e => e.classList.remove('sel'));
+  const el = $('w' + id); if (el) { el.classList.add('sel'); el.scrollIntoView({block:'nearest'}); }
+  Object.entries(lines).forEach(([k, l]) => l.setStyle({weight: k == id ? 7 : 4}));
+  if (lines[id]) { lines[id].bringToFront(); map.fitBounds(lines[id].getBounds(), {padding:[30,30]}); }
+}
+</script>
+</body>
+</html>
