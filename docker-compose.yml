@@ -10,6 +10,10 @@ services:
       DB_PATH: /data/walkbox.db
       MAX_SPAN_DEG: "0.5"
       MAX_RESULTS: "150"
+    # Public DNS so the container can reach the OpenStreetMap servers.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     networks:
       - proxynet
     restart: unless-stopped

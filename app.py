@@ -140,9 +140,21 @@ def simplify(chain, max_points=250):
 # --------------------------------------------------------------------------
 # Overpass
 # --------------------------------------------------------------------------
+def _short_error(url, exc):
+    host = url.split("/")[2] if "//" in url else url
+    text = str(exc).lower()
+    if "name resolution" in text or "nodename" in text or "name or service not known" in text:
+        reason = "DNS lookup failed (container has no working DNS)"
+    elif "timed out" in text:
+        reason = "timed out"
+    else:
+        reason = str(exc)[:120]
+    return "%s: %s" % (host, reason)
+
+
 def overpass(query):
     """POST a query to Overpass, one at a time, trying fallback servers."""
-    last = None
+    errors = []
     with _overpass_lock:
         for url in OVERPASS_URLS:
             try:
@@ -151,11 +163,11 @@ def overpass(query):
                 )
                 if r.status_code == 200:
                     return r.json()
-                last = "%s returned HTTP %s" % (url, r.status_code)
+                errors.append("%s: HTTP %s" % (url.split("/")[2], r.status_code))
             except (requests.RequestException, ValueError) as e:
-                last = "%s failed: %s" % (url, e)
+                errors.append(_short_error(url, e))
             time.sleep(1)
-    raise RuntimeError(last or "No Overpass server configured")
+    raise RuntimeError("; ".join(errors) or "No Overpass server configured")
 
 
 def parse_relation(el):
