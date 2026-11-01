@@ -107,7 +107,7 @@
       <button class="b" id="addSelBtn">Add selected to my box</button>
       <button class="b alt" id="selAllBtn">Select all</button>
     </div>
-    <div id="status">Move the map to an area, then press “Find walks in this map view”.</div>
+    <div id="status">Finding your location…</div>
     <div id="list"></div>
     <div class="foot">Route data © OpenStreetMap contributors (ODbL). Check conditions before you walk.</div>
   </section>
@@ -634,17 +634,13 @@ function focus(id) {
   const r = results.find(x => x.osm_id == id); if (r) selectWalk(r);
 }
 
-// ---- Start at the current location; fall back to Auckland CBD ----
+// ---- Start with the map on the current location; fall back to Auckland CBD. No automatic search. ----
 (function startLocation() {
-  const fallback = msg => { status(msg + ' Showing Auckland CBD.'); runSearch(); };
-  if (!navigator.geolocation) { fallback('Location is not available in this browser.'); return; }
-  status('Finding your location…');
+  const hint = ' Press “Find walks in this map view” to search.';
+  if (!navigator.geolocation) { status('Location is not available in this browser. Showing Auckland CBD.' + hint); return; }
   navigator.geolocation.getCurrentPosition(
-    pos => {
-      map.setView([pos.coords.latitude, pos.coords.longitude], 13, {animate: false});
-      runSearch();
-    },
-    () => fallback('Could not get your location.'),
+    pos => { map.setView([pos.coords.latitude, pos.coords.longitude], 13, {animate: false}); status('Showing your current location.' + hint); },
+    () => status('Could not get your location. Showing Auckland CBD.' + hint),
     {enableHighAccuracy: false, timeout: 8000, maximumAge: 600000}
   );
 })();
