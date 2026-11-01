@@ -1,7 +1,10 @@
-"""Walkbox: find walking routes anywhere (OpenStreetMap), add them to a
-searchable local library, and download them as GPX files.
+"""Walkbox: find walking routes anywhere, add them to a searchable local
+library, and download them as GPX files.
 
-Data: (c) OpenStreetMap contributors, ODbL. https://www.openstreetmap.org/copyright
+Sources:
+  * OpenStreetMap official route relations   (c) OpenStreetMap contributors, ODbL
+  * OpenStreetMap named footpaths, grouped   (c) OpenStreetMap contributors, ODbL
+  * NZ Department of Conservation tracks     Source: DOC, CC BY 4.0
 """
 import io
 import json
@@ -11,6 +14,7 @@ import re
 import sqlite3
 import threading
 import time
+import zlib
 import zipfile
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
@@ -26,16 +30,39 @@ OVERPASS_URLS = [
     ).split(",")
     if u.strip()
 ]
+DOC_URL = os.environ.get(
+    "DOC_URL",
+    "https://services1.arcgis.com/3JjYDyG3oajxU6HO/ArcGIS/rest/services/"
+    "DOC_Walking_Experiences/FeatureServer/1/query",
+)
+ELEVATION_URL = os.environ.get("ELEVATION_URL", "https://api.open-meteo.com/v1/elevation")
 DB_PATH = os.environ.get("DB_PATH", "/data/walkbox.db")
-MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))  # max map width/height searched
+MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "150"))
+MAX_PATH_WAYS = int(os.environ.get("MAX_PATH_WAYS", "2500"))
+MIN_PATH_KM = float(os.environ.get("MIN_PATH_KM", "0.8"))
 ROUTE_TYPES = os.environ.get("ROUTE_TYPES", "hiking|foot|walking")
-USER_AGENT = os.environ.get("USER_AGENT", "walkbox/1.0 (self-hosted walk library)")
-ATTRIBUTION = "(c) OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)"
+PATH_HIGHWAYS = os.environ.get("PATH_HIGHWAYS", "footway|path|track|pedestrian")
+USER_AGENT = os.environ.get("USER_AGENT", "walkbox/1.1 (self-hosted walk library)")
+
+ALL_SOURCES = ("routes", "paths", "doc")
+NZ_BOX = (-48.0, -34.0, 166.0, 179.5)  # south, north, west, east
+PATH_BASE = 10 ** 12  # synthetic ids for grouped OSM paths
+DOC_BASE = 2 * 10 ** 12  # synthetic ids for DOC tracks
+GENERIC_NAMES = {"footpath", "path", "track", "walkway", "footway", "pavement", "steps",
+                 "pedestrian", "boardwalk", "trail", "walking track", "unnamed"}
+
+ATTRIBUTION = {
+    "osm-route": "(c) OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)",
+    "osm-path": "(c) OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)",
+    "doc": "Source: New Zealand Department of Conservation, CC BY 4.0 "
+           "(https://creativecommons.org/licenses/by/4.0/)",
+}
+SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC"}
 
 app = Flask(__name__)
 _overpass_lock = threading.Lock()
-_cache = {}  # osm_id -> parsed walk (from recent searches)
+_cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 
 
@@ -60,6 +87,10 @@ CREATE TABLE IF NOT EXISTS walks (
 );
 CREATE INDEX IF NOT EXISTS walks_name ON walks(name);
 """
+EXTRA_COLUMNS = {
+    "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
+    "link": "TEXT", "region": "TEXT", "time_text": "TEXT",
+}
 
 
 def db():
@@ -68,6 +99,11 @@ def db():
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
         g.db.executescript(SCHEMA)
+        have = {r[1] for r in g.db.execute("PRAGMA table_info(walks)")}
+        for col, typ in EXTRA_COLUMNS.items():
+            if col not in have:
+                g.db.execute("ALTER TABLE walks ADD COLUMN %s %s" % (col, typ))
+        g.db.commit()
     return g.db
 
 
@@ -97,11 +133,7 @@ def _same(a, b):
 
 
 def chain_segments(segs):
-    """Join way geometries end-to-end into continuous chains.
-
-    Ways of a route relation share end nodes, so exact endpoint matching works.
-    Returns chains sorted longest first; gaps in the relation give several chains.
-    """
+    """Join way geometries end-to-end into continuous chains (longest first)."""
     remaining = [list(s) for s in segs if len(s) >= 2]
     chains = []
     while remaining:
@@ -138,7 +170,150 @@ def simplify(chain, max_points=250):
 
 
 # --------------------------------------------------------------------------
-# Overpass
+# Derived, AllTrails-style stats
+# --------------------------------------------------------------------------
+def route_type_of(chains):
+    main = chains[0]
+    if len(main) > 2 and haversine_m(main[0], main[-1]) < 150 and chain_length_m(main) > 500:
+        return "Loop"
+    return "Point to point"
+
+
+SAC = {
+    "hiking": "Easy", "mountain_hiking": "Moderate", "demanding_mountain_hiking": "Hard",
+    "alpine_hiking": "Hard", "demanding_alpine_hiking": "Hard", "difficult_alpine_hiking": "Hard",
+}
+
+
+def difficulty_from_tags(tags):
+    sac = (tags or {}).get("sac_scale")
+    return SAC.get(sac)
+
+
+def est_minutes(distance_km, ascent_m):
+    """Naismith-style: 5 km/h plus 10 minutes per 100 m of climbing."""
+    return int(round(distance_km * 12 + (ascent_m or 0) * 0.1))
+
+
+def fmt_minutes(m):
+    if m < 60:
+        return "%d min" % m
+    return "%d h %02d min" % (m // 60, m % 60)
+
+
+def elevation_gain(chain):
+    """Best-effort total ascent in metres using a free elevation API."""
+    pts = simplify(chain, 100)
+    try:
+        r = requests.get(
+            ELEVATION_URL,
+            params={"latitude": ",".join("%.5f" % p[0] for p in pts),
+                    "longitude": ",".join("%.5f" % p[1] for p in pts)},
+            headers={"User-Agent": USER_AGENT}, timeout=20,
+        )
+        elev = r.json().get("elevation") if r.status_code == 200 else None
+    except (requests.RequestException, ValueError):
+        return None
+    if not elev or len(elev) != len(pts) or any(e is None for e in elev):
+        return None
+    gain = 0.0
+    for a, b in zip(elev, elev[1:]):
+        if b - a > 1.0:  # ignore sub-metre noise
+            gain += b - a
+    return round(gain, 0)
+
+
+# --------------------------------------------------------------------------
+# Walk construction
+# --------------------------------------------------------------------------
+def make_walk(osm_id, source, name, chains, tags=None, **extra):
+    chains = [c for c in chains if len(c) >= 2]
+    if not chains:
+        return None
+    pts = [p for c in chains for p in c]
+    tags = tags or {}
+    w = {
+        "osm_id": osm_id, "source": source, "name": name,
+        "ref": tags.get("ref"), "network": tags.get("network"), "operator": tags.get("operator"),
+        "description": tags.get("description") or tags.get("note"),
+        "distance_km": round(sum(chain_length_m(c) for c in chains) / 1000.0, 2),
+        "lat": sum(p[0] for p in pts) / len(pts), "lon": sum(p[1] for p in pts) / len(pts),
+        "tags": tags, "chains": chains, "route_type": route_type_of(chains),
+        "difficulty": difficulty_from_tags(tags), "ascent_m": None,
+        "link": None, "region": None, "time_text": None,
+    }
+    w.update({k: v for k, v in extra.items() if v is not None})
+    return w
+
+
+def parse_relation(el):
+    tags = el.get("tags", {})
+    segs = [[(p["lat"], p["lon"]) for p in m["geometry"]]
+            for m in el.get("members", []) if m.get("type") == "way" and m.get("geometry")]
+    chains = chain_segments(segs)
+    name = tags.get("name") or tags.get("ref") or "Unnamed route %d" % el["id"]
+    return make_walk(el["id"], "osm-route", name, chains, tags)
+
+
+def group_named_paths(elements):
+    """Group named footpath ways into one walk per name."""
+    groups = {}
+    for el in elements:
+        if el.get("type") != "way" or not el.get("geometry"):
+            continue
+        tags = el.get("tags", {})
+        name = (tags.get("name") or "").strip()
+        if not name or name.lower() in GENERIC_NAMES:
+            continue
+        groups.setdefault(name, []).append(
+            ([(p["lat"], p["lon"]) for p in el["geometry"]], tags))
+    walks = []
+    for name, items in groups.items():
+        chains = chain_segments([seg for seg, _ in items])
+        dist = sum(chain_length_m(c) for c in chains) / 1000.0
+        if dist < MIN_PATH_KM:
+            continue
+        merged = {}
+        for _, t in items:
+            for k, v in t.items():
+                merged.setdefault(k, v)
+        lat0, lon0 = chains[0][0]
+        wid = PATH_BASE + zlib.crc32(("%s|%.2f|%.2f" % (name, lat0, lon0)).encode("utf-8"))
+        wk = make_walk(wid, "osm-path", name, chains, merged)
+        if wk:
+            walks.append(wk)
+    return walks
+
+
+def parse_doc(data):
+    walks = []
+    for f in data.get("features", []):
+        geom = f.get("geometry") or {}
+        coords = geom.get("coordinates") or []
+        if geom.get("type") == "LineString":
+            lines = [coords]
+        elif geom.get("type") == "MultiLineString":
+            lines = coords
+        else:
+            continue
+        segs = [[(c[1], c[0]) for c in line] for line in lines if len(line) >= 2]
+        chains = chain_segments(segs)
+        p = {str(k).lower(): v for k, v in (f.get("properties") or {}).items()}
+        name = p.get("name") or "DOC track"
+        oid = p.get("objectid") or f.get("id") or zlib.crc32(name.encode("utf-8"))
+        link = p.get("walkingandtrampingwebpage") or p.get("staticlink")
+        wk = make_walk(
+            DOC_BASE + int(oid), "doc", name, chains, {"operator": "Department of Conservation"},
+            description=p.get("introduction"), difficulty=p.get("difficulty"),
+            time_text=p.get("completiontime"), region=p.get("region"), link=link,
+        )
+        if wk:
+            walks.append(wk)
+    return walks
+
+
+# --------------------------------------------------------------------------
+# Remote sources
 # --------------------------------------------------------------------------
 def _short_error(url, exc):
     host = url.split("/")[2] if "//" in url else url
@@ -153,14 +328,12 @@ def _short_error(url, exc):
 
 
 def overpass(query):
-    """POST a query to Overpass, one at a time, trying fallback servers."""
     errors = []
     with _overpass_lock:
         for url in OVERPASS_URLS:
             try:
-                r = requests.post(
-                    url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=90
-                )
+                r = requests.post(url, data={"data": query},
+                                  headers={"User-Agent": USER_AGENT}, timeout=90)
                 if r.status_code == 200:
                     return r.json()
                 errors.append("%s: HTTP %s" % (url.split("/")[2], r.status_code))
@@ -170,65 +343,79 @@ def overpass(query):
     raise RuntimeError("; ".join(errors) or "No Overpass server configured")
 
 
-def parse_relation(el):
-    """Turn an Overpass relation element (with geometry) into a walk dict."""
-    tags = el.get("tags", {})
-    segs = []
-    for m in el.get("members", []):
-        if m.get("type") == "way" and m.get("geometry"):
-            segs.append([(p["lat"], p["lon"]) for p in m["geometry"]])
-    chains = chain_segments(segs)
-    if not chains:
-        return None
-    dist_km = sum(chain_length_m(c) for c in chains) / 1000.0
-    pts = [p for c in chains for p in c]
-    lat = sum(p[0] for p in pts) / len(pts)
-    lon = sum(p[1] for p in pts) / len(pts)
-    osm_id = el["id"]
-    name = tags.get("name") or tags.get("ref") or "Unnamed route %d" % osm_id
-    return {
-        "osm_id": osm_id,
-        "name": name,
-        "ref": tags.get("ref"),
-        "network": tags.get("network"),
-        "operator": tags.get("operator"),
-        "description": tags.get("description") or tags.get("note"),
-        "distance_km": round(dist_km, 2),
-        "lat": lat,
-        "lon": lon,
-        "tags": tags,
-        "chains": chains,
-    }
-
-
-def search_bbox(s, w, n, e):
-    q = (
-        '[out:json][timeout:60];'
-        'rel["type"="route"]["route"~"^(%s)$"](%f,%f,%f,%f);'
-        "out tags geom %d;" % (ROUTE_TYPES, s, w, n, e, MAX_RESULTS)
-    )
-    data = overpass(q)
+def search_osm(s, w, n, e, want_routes, want_paths):
+    bbox = "(%f,%f,%f,%f)" % (s, w, n, e)
+    parts = ["[out:json][timeout:60];"]
+    if want_routes:
+        parts.append('rel["type"="route"]["route"~"^(%s)$"]%s->.r;' % (ROUTE_TYPES, bbox))
+    if want_paths:
+        parts.append(
+            'way["highway"~"^(%s)$"]["name"]["access"!~"^(private|no)$"]["foot"!="no"]%s->.p;'
+            % (PATH_HIGHWAYS, bbox))
+    if want_routes:
+        parts.append(".r out tags geom %d;" % MAX_RESULTS)
+    if want_paths:
+        parts.append(".p out tags geom %d;" % MAX_PATH_WAYS)
+    data = overpass("".join(parts))
+    elements = data.get("elements", [])
     walks = []
-    for el in data.get("elements", []):
-        if el.get("type") != "relation":
-            continue
-        walk = parse_relation(el)
-        if walk:
-            walks.append(walk)
-    with _cache_lock:
-        for wk in walks:
-            _cache[wk["osm_id"]] = wk
-        if len(_cache) > 2000:  # keep memory bounded
-            for k in list(_cache)[:1000]:
-                _cache.pop(k, None)
+    if want_routes:
+        for el in elements:
+            if el.get("type") == "relation":
+                wk = parse_relation(el)
+                if wk:
+                    walks.append(wk)
+    if want_paths:
+        walks.extend(group_named_paths(elements))
     return walks
 
 
-def fetch_by_ids(ids):
+def search_doc(s, w, n, e):
+    params = {
+        "where": "1=1", "geometry": "%f,%f,%f,%f" % (w, s, e, n),
+        "geometryType": "esriGeometryEnvelope", "inSR": 4326,
+        "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "outSR": 4326,
+        "resultRecordCount": MAX_RESULTS, "f": "geojson",
+    }
+    try:
+        r = requests.get(DOC_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=45)
+        data = r.json()
+    except (requests.RequestException, ValueError) as ex:
+        raise RuntimeError(_short_error(DOC_URL, ex))
+    if r.status_code != 200 or "error" in data:
+        raise RuntimeError("DOC service error: %s" % (data.get("error", {}).get("message") or r.status_code))
+    return parse_doc(data)
+
+
+def overlaps_nz(s, w, n, e):
+    return not (n < NZ_BOX[0] or s > NZ_BOX[1] or e < NZ_BOX[2] or w > NZ_BOX[3])
+
+
+def search_all(s, w, n, e, sources):
+    walks, problems = [], []
+    if "routes" in sources or "paths" in sources:
+        try:
+            walks += search_osm(s, w, n, e, "routes" in sources, "paths" in sources)
+        except RuntimeError as ex:
+            problems.append("OpenStreetMap: %s" % ex)
+    if "doc" in sources and overlaps_nz(s, w, n, e):
+        try:
+            walks += search_doc(s, w, n, e)
+        except RuntimeError as ex:
+            problems.append("DOC: %s" % ex)
+    with _cache_lock:
+        for wk in walks:
+            _cache[wk["osm_id"]] = wk
+        if len(_cache) > 3000:
+            for k in list(_cache)[:1500]:
+                _cache.pop(k, None)
+    return walks, problems
+
+
+def fetch_relations_by_ids(ids):
     q = "[out:json][timeout:60];rel(id:%s);out tags geom;" % ",".join(str(int(i)) for i in ids)
-    data = overpass(q)
     walks = []
-    for el in data.get("elements", []):
+    for el in overpass(q).get("elements", []):
         if el.get("type") == "relation":
             wk = parse_relation(el)
             if wk:
@@ -241,21 +428,38 @@ def fetch_by_ids(ids):
 # --------------------------------------------------------------------------
 def build_gpx(row):
     chains = json.loads(row["geom"])
-    tags = json.loads(row["tags"] or "{}")
+    source = row["source"] or "osm-route"
+    attribution = ATTRIBUTION.get(source, ATTRIBUTION["osm-route"])
     desc_parts = []
     if row["description"]:
         desc_parts.append(row["description"])
-    desc_parts.append("%.1f km walking route. %s" % (row["distance_km"], ATTRIBUTION))
+    stats = ["%.1f km" % row["distance_km"]]
+    if row["route_type"]:
+        stats.append(row["route_type"].lower())
+    if row["difficulty"]:
+        stats.append("difficulty: %s" % row["difficulty"])
+    if row["ascent_m"]:
+        stats.append("ascent about %d m" % row["ascent_m"])
+    desc_parts.append(", ".join(stats) + ". " + attribution)
     desc = " ".join(desc_parts)
-    osm_url = "https://www.openstreetmap.org/relation/%d" % row["osm_id"]
+    if source == "doc" and row["link"]:
+        link = row["link"]
+        link_text = "DOC page"
+    elif source == "osm-path":
+        link, link_text = "https://www.openstreetmap.org/#map=16/%.5f/%.5f" % (row["lat"], row["lon"]), "OpenStreetMap"
+    else:
+        link, link_text = "https://www.openstreetmap.org/relation/%d" % row["osm_id"], "OpenStreetMap relation"
+    author = "New Zealand Department of Conservation" if source == "doc" else "OpenStreetMap contributors"
+    license_url = ("https://creativecommons.org/licenses/by/4.0/" if source == "doc"
+                   else "https://opendatacommons.org/licenses/odbl/")
     out = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="walkbox" xmlns="http://www.topografix.com/GPX/1/1">',
         "<metadata>",
         "<name>%s</name>" % escape(row["name"]),
         "<desc>%s</desc>" % escape(desc),
-        '<link href="%s"><text>OpenStreetMap relation %d</text></link>' % (escape(osm_url), row["osm_id"]),
-        "<copyright author=\"OpenStreetMap contributors\"><license>https://opendatacommons.org/licenses/odbl/</license></copyright>",
+        '<link href="%s"><text>%s</text></link>' % (escape(link), escape(link_text)),
+        '<copyright author="%s"><license>%s</license></copyright>' % (escape(author), license_url),
         "</metadata>",
         "<trk>",
         "<name>%s</name>" % escape(row["name"]),
@@ -266,8 +470,7 @@ def build_gpx(row):
         for lat, lon in chain:
             out.append('<trkpt lat="%.7f" lon="%.7f"/>' % (lat, lon))
         out.append("</trkseg>")
-    out.append("</trk>")
-    out.append("</gpx>")
+    out += ["</trk>", "</gpx>"]
     return "\n".join(out)
 
 
@@ -277,20 +480,23 @@ def safe_filename(name, osm_id):
 
 
 # --------------------------------------------------------------------------
-# Routes
+# Presentation
 # --------------------------------------------------------------------------
 def public(walk, added=False, preview=True):
+    """Shape a walk dict or DB row (as dict) for the browser."""
+    ascent = walk.get("ascent_m")
+    mins = est_minutes(walk["distance_km"], ascent)
     d = {
-        "osm_id": walk["osm_id"],
-        "name": walk["name"],
-        "ref": walk.get("ref"),
-        "network": walk.get("network"),
-        "operator": walk.get("operator"),
-        "description": walk.get("description"),
-        "distance_km": walk["distance_km"],
-        "lat": walk.get("lat"),
-        "lon": walk.get("lon"),
-        "added": added,
+        "osm_id": walk["osm_id"], "name": walk["name"], "ref": walk.get("ref"),
+        "network": walk.get("network"), "operator": walk.get("operator"),
+        "description": walk.get("description"), "distance_km": walk["distance_km"],
+        "lat": walk.get("lat"), "lon": walk.get("lon"), "added": added,
+        "source": walk.get("source") or "osm-route",
+        "source_label": SOURCE_LABEL.get(walk.get("source") or "osm-route", "OSM"),
+        "difficulty": walk.get("difficulty"), "route_type": walk.get("route_type"),
+        "ascent_m": ascent, "link": walk.get("link"), "region": walk.get("region"),
+        "time_text": walk.get("time_text") or ("about " + fmt_minutes(mins)),
+        "place": walk.get("place"), "added_at": walk.get("added_at"),
     }
     if preview:
         d["line"] = [simplify(c) for c in walk["chains"][:20]]
@@ -316,25 +522,28 @@ def api_search():
         return jsonify(error="south, west, north, east are required numbers"), 400
     if not (-90 <= s < n <= 90) or not (-180 <= w <= 180) or not (-180 <= e <= 180):
         return jsonify(error="Invalid map area"), 400
-    if e < w:  # area crosses the antimeridian; not supported
+    if e < w:
         return jsonify(error="Please pan the map so it does not cross the date line"), 400
     if (n - s) > MAX_SPAN_DEG or (e - w) > MAX_SPAN_DEG:
-        return jsonify(error="Zoom in further: the search area is too large (max about %d km)." % int(MAX_SPAN_DEG * 111)), 400
-    try:
-        walks = search_bbox(s, w, n, e)
-    except RuntimeError as ex:
-        return jsonify(error="OpenStreetMap server problem: %s" % ex), 502
+        return jsonify(error="Zoom in further: the search area is too large (max about %d km)."
+                       % int(MAX_SPAN_DEG * 111)), 400
+    sources = [x for x in (b.get("sources") or ALL_SOURCES) if x in ALL_SOURCES]
+    if not sources:
+        return jsonify(error="Choose at least one source"), 400
+    walks, problems = search_all(s, w, n, e, sources)
+    if not walks and problems:
+        return jsonify(error="Could not search: " + " | ".join(problems)), 502
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
-    walks.sort(key=lambda x: x["distance_km"], reverse=True)
+    walks.sort(key=lambda x: (x["source"] != "doc", -x["distance_km"]))
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks],
-                   capped=len(walks) >= MAX_RESULTS)
+                   warnings=problems, capped=len(walks) >= MAX_RESULTS)
 
 
 @app.post("/api/walks")
 def api_add():
-    ids = (request.get_json(silent=True) or {}).get("ids", [])
+    body = request.get_json(silent=True) or {}
     try:
-        ids = [int(i) for i in ids][:100]
+        ids = [int(i) for i in body.get("ids", [])][:100]
     except (TypeError, ValueError):
         return jsonify(error="ids must be numbers"), 400
     if not ids:
@@ -342,22 +551,34 @@ def api_add():
     with _cache_lock:
         found = {i: _cache[i] for i in ids if i in _cache}
     missing = [i for i in ids if i not in found]
+    expired = [i for i in missing if i >= PATH_BASE]
+    if expired:
+        return jsonify(error="Those results have expired. Search the area again, then add them."), 409
     if missing:
         try:
-            for wk in fetch_by_ids(missing):
+            for wk in fetch_relations_by_ids(missing):
                 found[wk["osm_id"]] = wk
         except RuntimeError as ex:
             return jsonify(error="OpenStreetMap server problem: %s" % ex), 502
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn = db()
+    existing = {r["osm_id"] for r in conn.execute(
+        "SELECT osm_id FROM walks WHERE osm_id IN (%s)" % ",".join("?" * len(found)), list(found)
+    )} if found else set()
     added = 0
     for wk in found.values():
+        if wk["osm_id"] in existing:
+            continue
+        if wk.get("ascent_m") is None:
+            wk["ascent_m"] = elevation_gain(wk["chains"][0])
         cur = conn.execute(
             "INSERT OR IGNORE INTO walks (osm_id,name,ref,network,operator,description,distance_km,"
-            "lat,lon,place,tags,geom,added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "lat,lon,place,tags,geom,added_at,source,difficulty,route_type,ascent_m,link,region,time_text)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wk["osm_id"], wk["name"], wk["ref"], wk["network"], wk["operator"], wk["description"],
-             wk["distance_km"], wk["lat"], wk["lon"], (request.get_json() or {}).get("place"),
-             json.dumps(wk["tags"]), json.dumps(wk["chains"]), now),
+             wk["distance_km"], wk["lat"], wk["lon"], body.get("place"),
+             json.dumps(wk["tags"]), json.dumps(wk["chains"]), now, wk["source"], wk["difficulty"],
+             wk["route_type"], wk["ascent_m"], wk["link"], wk["region"], wk["time_text"]),
         )
         added += cur.rowcount
     conn.commit()
@@ -370,13 +591,13 @@ def api_library():
     min_km = request.args.get("min_km", type=float)
     max_km = request.args.get("max_km", type=float)
     sort = request.args.get("sort", "added")
-    sql = ("SELECT osm_id,name,ref,network,operator,description,distance_km,lat,lon,place,added_at,geom "
-           "FROM walks WHERE 1=1")
+    sql = "SELECT * FROM walks WHERE 1=1"
     args = []
     for term in q.split():
         like = "%" + term.replace("%", "").replace("_", "") + "%"
-        sql += " AND (name LIKE ? OR ref LIKE ? OR operator LIKE ? OR network LIKE ? OR description LIKE ? OR place LIKE ?)"
-        args += [like] * 6
+        sql += (" AND (name LIKE ? OR ref LIKE ? OR operator LIKE ? OR network LIKE ?"
+                " OR description LIKE ? OR place LIKE ? OR region LIKE ? OR difficulty LIKE ?)")
+        args += [like] * 8
     if min_km is not None:
         sql += " AND distance_km >= ?"
         args.append(min_km)
@@ -388,13 +609,9 @@ def api_library():
     rows = db().execute(sql + " ORDER BY " + order + " LIMIT 500", args).fetchall()
     items = []
     for r in rows:
-        chains = json.loads(r["geom"])
-        items.append({
-            "osm_id": r["osm_id"], "name": r["name"], "ref": r["ref"], "network": r["network"],
-            "operator": r["operator"], "description": r["description"], "distance_km": r["distance_km"],
-            "lat": r["lat"], "lon": r["lon"], "place": r["place"], "added_at": r["added_at"],
-            "added": True, "line": [simplify(c) for c in chains[:20]],
-        })
+        d = dict(r)
+        d["chains"] = json.loads(d["geom"])
+        items.append(public(d, added=True))
     return jsonify(results=items)
 
 
@@ -404,17 +621,15 @@ def download_gpx(osm_id):
     if not row:
         abort(404)
     return Response(
-        build_gpx(row),
-        mimetype="application/gpx+xml",
+        build_gpx(row), mimetype="application/gpx+xml",
         headers={"Content-Disposition": 'attachment; filename="%s"' % safe_filename(row["name"], osm_id)},
     )
 
 
 @app.get("/walks.zip")
 def download_zip():
-    ids = request.args.get("ids", "")
     try:
-        id_list = [int(i) for i in ids.split(",") if i.strip()]
+        id_list = [int(i) for i in request.args.get("ids", "").split(",") if i.strip()]
     except ValueError:
         abort(400)
     conn = db()
@@ -427,9 +642,11 @@ def download_zip():
         abort(404)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        used = set()
         for r in rows:
             z.writestr(safe_filename(r["name"], r["osm_id"]), build_gpx(r))
-        z.writestr("ATTRIBUTION.txt", "Route data: " + ATTRIBUTION + "\n")
+            used.add(r["source"] or "osm-route")
+        z.writestr("ATTRIBUTION.txt", "\n".join("Route data: " + ATTRIBUTION[u] for u in sorted(used)) + "\n")
     return Response(buf.getvalue(), mimetype="application/zip",
                     headers={"Content-Disposition": 'attachment; filename="walkbox-walks.zip"'})
 

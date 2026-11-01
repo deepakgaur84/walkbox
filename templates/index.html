@@ -31,6 +31,9 @@
   .item .t { font-weight:600; }
   .item .m { font-size:13px; color:var(--mute); }
   .item .d { font-size:13px; margin-top:2px; }
+  .src { font-size:13px; color:var(--mute); display:flex; align-items:center; gap:4px; }
+  .chip { display:inline-block; font-size:12px; background:var(--brand2); color:var(--brand); padding:1px 8px; border-radius:10px; margin:2px 4px 0 0; }
+  .chip.warn { background:#fdecea; color:var(--warn); }
   .badge { font-size:11px; background:var(--brand2); color:var(--brand); padding:1px 7px; border-radius:10px; margin-left:6px; }
   .acts { display:flex; flex-direction:column; gap:4px; align-items:flex-end; }
   .acts a, .acts button { font-size:13px; }
@@ -54,6 +57,9 @@
       <input type="text" id="place" placeholder="Go to a place, e.g. Queenstown">
       <button class="b alt" id="goBtn">Go</button>
       <button class="b" id="searchBtn" style="width:100%">Find walks in this map view</button>
+      <label class="src"><input type="checkbox" id="srcDoc" checked> DOC tracks (NZ)</label>
+      <label class="src"><input type="checkbox" id="srcRoutes" checked> Official routes</label>
+      <label class="src"><input type="checkbox" id="srcPaths" checked> Named paths</label>
     </div>
     <div id="boxTools" class="tools" style="display:none">
       <input type="text" id="q" placeholder="Search your walks (name, place, operator…)">
@@ -140,9 +146,14 @@ $('searchBtn').onclick = async () => {
   }
   $('searchBtn').disabled = true; status('Searching OpenStreetMap…');
   try {
-    const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast()});
+    const sources = [];
+    if ($('srcDoc').checked) sources.push('doc');
+    if ($('srcRoutes').checked) sources.push('routes');
+    if ($('srcPaths').checked) sources.push('paths');
+    const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources});
     results = j.results; selected.clear();
-    status(results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '.' : 'No walking routes found here. Try another area.');
+    const warn = j.warnings && j.warnings.length ? ' Note: ' + j.warnings.join(' | ') : '';
+    status((results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
     $('findActions').style.display = results.length ? '' : 'none';
     render();
   } catch (e) { status(e.message, true); }
@@ -198,8 +209,15 @@ function render() {
     const t = document.createElement('div'); t.className = 't'; t.textContent = r.name;
     if (r.added && mode === 'find') { const bd = document.createElement('span'); bd.className = 'badge'; bd.textContent = 'in box'; t.appendChild(bd); }
     const m = document.createElement('div'); m.className = 'm';
-    m.textContent = [r.distance_km.toFixed(1) + ' km', r.ref && ('ref ' + r.ref), r.network, r.operator, r.place].filter(Boolean).join(' · ');
+    m.textContent = [r.distance_km.toFixed(1) + ' km', r.route_type, r.time_text, r.ascent_m ? ('↑ ' + Math.round(r.ascent_m) + ' m') : null, r.region || r.place].filter(Boolean).join(' · ');
     body.append(t, m);
+    const chips = document.createElement('div');
+    const chip = (txt, cls) => { const c = document.createElement('span'); c.className = 'chip' + (cls ? ' ' + cls : ''); c.textContent = txt; chips.appendChild(c); };
+    if (r.difficulty) chip(r.difficulty);
+    chip(r.source_label);
+    if (r.ref) chip('ref ' + r.ref);
+    body.appendChild(chips);
+    if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info (DOC page)'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
     if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
     item.appendChild(body);
     if (r.added) {
