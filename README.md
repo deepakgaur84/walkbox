@@ -22,7 +22,8 @@ Every walk card has a **Navigate** button:
 - **Directions to the start** opens Google Maps (or Apple Maps) with the start of the walk as the destination. Free, no key needed.
 - **Walk the route (Google Maps)** passes the start, end and up to 8 points along the walk to Google Maps in walking mode. Google
   finds its own paths between those points, so this is an approximation, not the exact track.
-- **Open in a map app** uses a `geo:` link for apps such as OsmAnd or Organic Maps (Android).
+- **Show start / Walking route in Organic Maps** open the free offline Organic Maps app on your phone (it must be installed) using its `om://` links. Its route is its own pedestrian route from the start to the end of the walk.
+- **Open in any map app** uses a `geo:` link for apps such as OsmAnd (Android).
 - **Show my position on this route** shows a blue dot on the Walkbox map and tells you whether you are on the route, how far off it
   you are, and how far you are from the start. It uses your browser's location, so it needs the https address and location permission,
   and the page must stay open. It does not give turn-by-turn spoken directions.

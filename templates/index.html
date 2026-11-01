@@ -243,7 +243,10 @@ function navLinks(r) {
     walk: base + '&origin=' + fmtPt(s) + '&destination=' + fmtPt(e) +
           (mid.length ? '&waypoints=' + encodeURIComponent(mid.map(fmtPt).join('|')) : '') + '&travelmode=walking',
     apple: 'https://maps.apple.com/?daddr=' + fmtPt(s) + '&dirflg=w',
-    geo: 'geo:' + fmtPt(s) + '?q=' + fmtPt(s) + '(' + encodeURIComponent(r.name) + ')'
+    geo: 'geo:' + fmtPt(s) + '?q=' + fmtPt(s) + '(' + encodeURIComponent(r.name) + ')',
+    omShow: 'om://map?v=1&ll=' + fmtPt(s) + '&n=' + encodeURIComponent(r.name) + '&appname=Walkbox',
+    omRoute: 'om://route?v=1&sll=' + fmtPt(s) + '&saddr=' + encodeURIComponent('Start') +
+             '&dll=' + fmtPt(e) + '&daddr=' + encodeURIComponent(r.name) + '&type=pedestrian&appname=Walkbox'
   };
 }
 function havM(a, b) {
@@ -300,9 +303,11 @@ function makeNav(r) {
   add(L_.toStart, 'Directions to the start (Google Maps)');
   add(L_.walk, 'Walk the route (Google Maps)');
   add(L_.apple, 'Apple Maps to the start');
-  add(L_.geo, 'Open in a map app (OsmAnd, Organic Maps)');
+  add(L_.omShow, 'Show start in Organic Maps');
+  add(L_.omRoute, 'Walking route in Organic Maps');
+  add(L_.geo, 'Open in any map app (OsmAnd, etc.)');
   const note = document.createElement('div'); note.className = 'att'; note.style.cssText = 'font-size:11px;color:var(--mute);margin:4px 0';
-  note.textContent = 'Google Maps follows its own paths between a few points on the walk, so it is approximate. For the exact track, download the GPX and open it in an offline app such as OsmAnd or Organic Maps.';
+  note.textContent = 'Google Maps follows its own paths between a few points on the walk, so it is approximate. For the exact track, download the GPX and open it in Organic Maps or OsmAnd (needs the app installed on your phone).';
   const live = document.createElement('div'); live.className = 'live';
   const tb = document.createElement('button'); tb.className = 'b alt'; tb.style.cssText = 'padding:4px 10px;font-size:13px'; tb.textContent = 'Show my position on this route';
   tb.onclick = () => { if (watchId !== null) { stopTracking(); tb.textContent = 'Show my position on this route'; live.textContent = ''; } else startTracking(r, live, tb); };
