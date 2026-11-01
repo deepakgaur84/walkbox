@@ -8,7 +8,6 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
-os.environ["GOOGLE_PLACES_API_KEY"] = "testkey"
 import app as wb  # noqa: E402
 
 
@@ -75,6 +74,23 @@ NZT = {"features": [
 ]}
 
 
+def cpage(pid, idx, title, url, mime="image/jpeg", width=2000, artist="<a href='x'>Jo Photog</a>",
+          lic="CC BY-SA 4.0", host="upload.wikimedia.org", desc="A <b>nice</b> view"):
+    return {"pageid": pid, "index": idx, "title": "File:" + title, "imageinfo": [{
+        "thumburl": "https://%s/thumb/%s" % (host, url), "descriptionurl": "https://commons.wikimedia.org/wiki/File:" + title,
+        "mime": mime, "width": width,
+        "extmetadata": {"Artist": {"value": artist}, "LicenseShortName": {"value": lic}, "ImageDescription": {"value": desc}}}]}
+
+
+COMMONS = {"query": {"pages": {
+    "1": cpage(1, 1, "Beach.jpg", "beach.jpg"),
+    "2": cpage(2, 2, "Plan.svg", "plan.svg.png", mime="image/svg+xml"),     # wrong type
+    "3": cpage(3, 3, "Tiny.jpg", "tiny.jpg", width=200),                    # too small
+    "4": cpage(4, 4, "Evil.jpg", "evil.jpg", host="evil.example.com"),      # wrong host
+    "5": cpage(5, 5, "Pier.jpg", "pier.jpg", artist="Unknown <i>author</i>"),
+}}}
+
+
 class Resp:
     def __init__(self, data, code=200):
         self._d, self.status_code = data, code
@@ -91,44 +107,13 @@ def fake_get(url, **kw):
     if "open-meteo" in url or "elevation" in url:
         n = len(kw["params"]["latitude"].split(","))
         return Resp({"elevation": [100 + (i % 10) * 3 for i in range(n)]})
-    if url.endswith("/media"):
-        if "BADHOST" in url:
-            return Resp({"photoUri": "https://evil.example.com/x.jpg"})
-        return Resp({"photoUri": "https://lh3.googleusercontent.com/abc"})
-    if "googleusercontent.com" in url:
-        r = Resp({})
-        r.content, r.headers = b"\xff\xd8\xff\xe0fakejpeg", {"Content-Type": "image/jpeg"}
-        return r
+    if "commons.wikimedia.org" in url:
+        return Resp(COMMONS)
     if "b5ADKIcWivL5vNaV" in url:
         return Resp(NZT)
     return Resp(DOC)
 
 
-PLACES = {"places": [
-    {"id": "p1", "displayName": {"text": "Bunnings Takapuna"}, "location": {"latitude": -36.8, "longitude": 174.77},
-     "rating": 4.0, "userRatingCount": 10},
-    {"id": "p2", "displayName": {"text": "Takapuna Beach Walkway"}, "formattedAddress": "Takapuna, Auckland",
-     "location": {"latitude": -36.8, "longitude": 174.77}, "rating": 4.7, "userRatingCount": 321,
-     "googleMapsUri": "https://maps.google.com/?cid=1",
-     "reviews": [{"rating": 5, "text": {"text": "Lovely flat walk <b>by the sea</b>"}, "relativePublishTimeDescription": "a month ago",
-                  "authorAttribution": {"displayName": "Sam", "uri": "https://maps.google.com/u/1"}},
-                 {"rating": 4, "originalText": {"text": "Busy at weekends"}, "authorAttribution": {"displayName": "Kim"}}],
-     "photos": [{"name": "places/p2/photos/REF1", "authorAttributions": [{"displayName": "Pat"}]},
-                {"name": "bad name", "authorAttributions": []}]},
-]}
-post_calls = []
-
-
-def fake_post(url, **kw):
-    post_calls.append((url, kw))
-    if "places.googleapis.com" in url:
-        if kw["headers"].get("X-Goog-Api-Key") != "testkey":
-            return Resp({"error": {"message": "API key not valid"}}, 403)
-        return Resp(PLACES)
-    raise AssertionError("unexpected POST " + url)
-
-
-wb.requests.post = fake_post
 wb.overpass = lambda q: (calls.append("overpass:" + q) or OVERPASS)
 wb.requests.get = fake_get
 c = wb.app.test_client()
@@ -285,44 +270,46 @@ assert "Imported by the user" in ig and "My Coast Walk" in ig
 ET.fromstring(ig.encode())
 assert [x["name"] for x in lib("q=sunny")] == ["My Coast Walk"]
 
-# --- Google reviews and photos
-g = c.get("/api/walks/%d/google" % nz_id)
-gj = g.get_json()
-assert g.status_code == 200 and gj["found"] and gj["name"] == "Takapuna Beach Walkway", gj  # not the Bunnings
-assert gj["rating"] == 4.7 and gj["count"] == 321 and gj["maps_url"].startswith("https://maps.google.com")
-assert [r["author"] for r in gj["reviews"]] == ["Sam", "Kim"] and gj["reviews"][1]["text"] == "Busy at weekends"
-assert gj["photos"] == [{"name": "places/p2/photos/REF1", "by": "Pat"}]  # invalid photo name dropped
-assert post_calls[-1][1]["headers"]["X-Goog-FieldMask"].count("places.") >= 8
-assert c.get("/api/walks/111/google").get_json() == {"found": False}  # no name match -> no wrong place
-assert c.get("/api/walks/999999/google").status_code == 404
-assert "Google" in c.get("/api/walks/%d/google" % nz_id, environ_overrides={}).get_data(as_text=True) or True
+# --- Photos from Wikimedia Commons
+ph = c.get("/api/walks/%d/photos" % nz_id)
+pj = ph.get_json()
+assert ph.status_code == 200, pj
+titles = [x["title"] for x in pj["photos"]]
+assert titles == ["Beach.jpg", "Pier.jpg"], titles  # svg, tiny and non-Wikimedia host dropped, deduped across 3 points
+first = pj["photos"][0]
+assert first["by"] == "Jo Photog" and first["license"] == "CC BY-SA 4.0" and first["caption"] == "A nice view"
+assert first["thumb"].startswith("https://upload.wikimedia.org/") and first["page"].startswith("https://commons.wikimedia.org/wiki/File:")
+assert pj["photos"][1]["by"] == "Unknown author"
+assert c.get("/api/walks/999999/photos").status_code == 404
+wb._rate_calls.clear(); wb.PHOTOS_PER_MIN = 2
+assert [c.get("/api/walks/%d/photos" % nz_id).status_code for _ in range(3)] == [200, 200, 429]
+wb.PHOTOS_PER_MIN = 30; wb._rate_calls.clear()
+real_get = wb.requests.get
+def down(url, **kw):
+    raise wb.requests.ConnectionError("Temporary failure in name resolution")
+wb.requests.get = down
+assert c.get("/api/walks/%d/photos" % nz_id).status_code == 502
+wb.requests.get = real_get
 
-ph = c.get("/api/gphoto?name=places/p2/photos/REF1&w=300")
-assert ph.status_code == 200 and ph.mimetype == "image/jpeg" and ph.data.startswith(b"\xff\xd8")
-assert c.get("/api/gphoto?name=../../etc/passwd").status_code == 400
-assert c.get("/api/gphoto").status_code == 400
-assert c.get("/api/gphoto?name=places/p2/photos/BADHOST").status_code == 502  # only Google image hosts
-
-# rate limit
-wb._google_calls["lookup"].clear(); wb.GOOGLE_CALLS_PER_MIN = 2
-codes = [c.get("/api/walks/%d/google" % nz_id).status_code for _ in range(3)]
-assert codes == [200, 200, 429], codes
-wb.GOOGLE_CALLS_PER_MIN = 20; wb._google_calls["lookup"].clear()
-
-# upstream error is reported clearly; key never reaches the browser
-wb.GOOGLE_KEY = "wrongkey"
-e = c.get("/api/walks/%d/google" % nz_id)
-assert e.status_code == 502 and "API key not valid" in e.get_json()["error"] and "wrongkey" not in e.get_data(as_text=True)
-wb.GOOGLE_KEY = ""
-assert c.get("/api/walks/%d/google" % nz_id).status_code == 404 and c.get("/api/gphoto?name=places/p2/photos/REF1").status_code == 404
-assert b"const GOOGLE = false" in c.get("/").data
-wb.GOOGLE_KEY = "testkey"
-assert b"const GOOGLE = true" in c.get("/").data and b"testkey" not in c.get("/").data
+# --- my rating and notes
+n = c.put("/api/walks/%d/note" % nz_id, json={"rating": 4, "note": "  Windy but lovely, park at the surf club  "})
+assert n.status_code == 200 and n.get_json()["my_rating"] == 4
+w = next(x for x in lib("q=walkway") if x["osm_id"] == nz_id)
+assert w["my_rating"] == 4 and w["my_note"] == "Windy but lovely, park at the surf club"
+assert [x["osm_id"] for x in lib("q=surf+club")] == [nz_id]            # notes are searchable
+assert c.put("/api/walks/%d/note" % nz_id, json={"rating": 6}).status_code == 400
+assert c.put("/api/walks/%d/note" % nz_id, json={"rating": "x"}).status_code == 400
+assert c.put("/api/walks/999999/note", json={"rating": 3}).status_code == 404
+c.put("/api/walks/%d/note" % nz_id, json={"rating": None, "note": ""})  # clearing works
+w = next(x for x in lib("q=walkway") if x["osm_id"] == nz_id)
+assert w["my_rating"] is None and w["my_note"] is None
+c.put("/api/walks/%d/note" % nz_id, json={"rating": 5, "note": "Great"})
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data
 assert b"Walkbox" in page and b"srcDoc" in page and b"srcNz" in page and b"importBtn" in page
+assert b"Photos & my notes" in page and b"google" not in page.lower()
 assert c.delete("/api/walks/111").get_json()["ok"]
 assert len(lib("")) == 3 + 2
 print("ALL TESTS PASSED")

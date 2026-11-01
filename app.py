@@ -8,6 +8,7 @@ Sources:
   * NZ national tracks (councils, LINZ, DOC)  Herenga a Nuku Outdoor Access Commission
   * GPX files you import yourself
 """
+import html
 import io
 import json
 import math
@@ -43,10 +44,8 @@ NZT_URL = os.environ.get(
     "https://services2.arcgis.com/b5ADKIcWivL5vNaV/ArcGIS/rest/services/"
     "National_Tracks_Dataset_Pilot/FeatureServer/0/query",
 )
-GOOGLE_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "").strip()
-GOOGLE_CALLS_PER_MIN = int(os.environ.get("GOOGLE_CALLS_PER_MINUTE", "20"))
-GOOGLE_PHOTOS_PER_MIN = int(os.environ.get("GOOGLE_PHOTOS_PER_MINUTE", "80"))
-PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+COMMONS_URL = os.environ.get("COMMONS_URL", "https://commons.wikimedia.org/w/api.php")
+PHOTOS_PER_MIN = int(os.environ.get("PHOTOS_PER_MINUTE", "30"))
 ELEVATION_URL = os.environ.get("ELEVATION_URL", "https://api.open-meteo.com/v1/elevation")
 DB_PATH = os.environ.get("DB_PATH", "/data/walkbox.db")
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
@@ -91,8 +90,8 @@ app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 _overpass_lock = threading.Lock()
 _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
-_google_lock = threading.Lock()
-_google_calls = {"lookup": [], "photo": []}
+_rate_lock = threading.Lock()
+_rate_calls = {}
 
 
 # --------------------------------------------------------------------------
@@ -119,6 +118,7 @@ CREATE INDEX IF NOT EXISTS walks_name ON walks(name);
 EXTRA_COLUMNS = {
     "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
     "link": "TEXT", "region": "TEXT", "time_text": "TEXT",
+    "my_rating": "INTEGER", "my_note": "TEXT",
 }
 
 
@@ -622,6 +622,7 @@ def public(walk, added=False, preview=True):
         "ascent_m": ascent, "link": walk.get("link"), "region": walk.get("region"),
         "time_text": walk.get("time_text") or ("about " + fmt_minutes(mins)),
         "place": walk.get("place"), "added_at": walk.get("added_at"),
+        "my_rating": walk.get("my_rating"), "my_note": walk.get("my_note"),
     }
     if preview:
         d["line"] = [simplify(c) for c in walk["chains"][:20]]
@@ -630,7 +631,7 @@ def public(walk, added=False, preview=True):
 
 @app.route("/")
 def index():
-    return render_template("index.html", max_span=MAX_SPAN_DEG, google_enabled=bool(GOOGLE_KEY))
+    return render_template("index.html", max_span=MAX_SPAN_DEG)
 
 
 @app.route("/healthz")
@@ -722,8 +723,9 @@ def api_library():
     for term in q.split():
         like = "%" + term.replace("%", "").replace("_", "") + "%"
         sql += (" AND (name LIKE ? OR ref LIKE ? OR operator LIKE ? OR network LIKE ?"
-                " OR description LIKE ? OR place LIKE ? OR region LIKE ? OR difficulty LIKE ?)")
-        args += [like] * 8
+                " OR description LIKE ? OR place LIKE ? OR region LIKE ? OR difficulty LIKE ?"
+                " OR my_note LIKE ?)")
+        args += [like] * 9
     if min_km is not None:
         sql += " AND distance_km >= ?"
         args.append(min_km)
@@ -778,123 +780,94 @@ def download_zip():
 
 
 # --------------------------------------------------------------------------
-# Google Maps reviews and photos (Places API, fetched live, never stored)
+# Photos (Wikimedia Commons, free, no key) and personal rating/notes
 # --------------------------------------------------------------------------
-STOP_WORDS = {"track", "walk", "trail", "walkway", "path", "loop", "the", "and", "route", "circuit"}
-PHOTO_NAME = re.compile(r"^places/[A-Za-z0-9_-]+/photos/[A-Za-z0-9_-]+$")
-
-
-def google_rate_ok(kind):
-    limit = GOOGLE_CALLS_PER_MIN if kind == "lookup" else GOOGLE_PHOTOS_PER_MIN
+def rate_ok(kind, limit):
     now = time.time()
-    with _google_lock:
-        calls = [t for t in _google_calls[kind] if now - t < 60]
-        if len(calls) >= limit:
-            _google_calls[kind] = calls
-            return False
-        calls.append(now)
-        _google_calls[kind] = calls
-        return True
+    with _rate_lock:
+        calls = [t for t in _rate_calls.get(kind, []) if now - t < 60]
+        ok = len(calls) < limit
+        if ok:
+            calls.append(now)
+        _rate_calls[kind] = calls
+        return ok
 
 
-def _name_tokens(name):
-    return {t for t in re.findall(r"[a-z0-9]+", (name or "").lower()) if len(t) > 3 and t not in STOP_WORDS}
+def _plain(text):
+    return html.unescape(re.sub(r"<[^>]+>", "", text or "")).strip()
 
 
-def google_lookup(name, lat, lon):
-    """Find the Google place that best matches a walk and return rating, reviews, photos."""
-    body = {
-        "textQuery": name, "maxResultCount": 5,
-        "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lon}, "radius": 5000.0}},
-    }
-    headers = {
-        "X-Goog-Api-Key": GOOGLE_KEY, "Content-Type": "application/json",
-        "X-Goog-FieldMask": ("places.id,places.displayName,places.formattedAddress,places.location,"
-                             "places.rating,places.userRatingCount,places.googleMapsUri,"
-                             "places.reviews,places.photos"),
-    }
-    try:
-        r = requests.post(PLACES_SEARCH_URL, json=body, headers=headers, timeout=20)
-        data = r.json()
-    except (requests.RequestException, ValueError) as ex:
-        raise RuntimeError(_short_error(PLACES_SEARCH_URL, ex))
-    if r.status_code != 200:
-        msg = (data.get("error") or {}).get("message") or ("HTTP %s" % r.status_code)
-        raise RuntimeError("Google: %s" % msg[:200])
-    want = _name_tokens(name)
-    need = max(1, math.ceil(0.6 * len(want)))  # most of the walk's name must match
-    best = None
-    for pl in data.get("places", []):
-        shown = (pl.get("displayName") or {}).get("text", "")
-        overlap = len(want & _name_tokens(shown))
-        if overlap < need:
-            continue
-        loc = pl.get("location") or {}
-        dist = haversine_m((lat, lon), (loc.get("latitude", lat), loc.get("longitude", lon)))
-        key = (-overlap / len(want), dist)  # best name match first, then nearest
-        if best is None or key < best[0]:
-            best = (key, pl)
-    if best is None:
-        return {"found": False}
-    pl = best[1]
-    reviews = []
-    for rv in (pl.get("reviews") or [])[:5]:
-        text = (rv.get("text") or rv.get("originalText") or {}).get("text") or ""
-        att = rv.get("authorAttribution") or {}
-        reviews.append({"author": att.get("displayName") or "Google user", "author_url": att.get("uri"),
-                        "rating": rv.get("rating"), "text": text,
-                        "when": rv.get("relativePublishTimeDescription")})
-    photos = []
-    for ph in (pl.get("photos") or [])[:8]:
-        if PHOTO_NAME.match(ph.get("name", "")):
-            photos.append({"name": ph["name"],
-                           "by": ", ".join(a.get("displayName", "") for a in ph.get("authorAttributions", []))})
-    return {"found": True, "name": (pl.get("displayName") or {}).get("text"),
-            "address": pl.get("formattedAddress"), "rating": pl.get("rating"),
-            "count": pl.get("userRatingCount"), "maps_url": pl.get("googleMapsUri"),
-            "reviews": reviews, "photos": photos}
+def commons_photos(chain, limit=12):
+    """Openly licensed, geotagged photos near the start, middle and end of a walk."""
+    pts = [chain[0], chain[len(chain) // 2], chain[-1]]
+    seen, found = set(), []
+    for order, (lat, lon) in enumerate(pts):
+        params = {
+            "action": "query", "format": "json", "generator": "geosearch",
+            "ggscoord": "%.5f|%.5f" % (lat, lon), "ggsradius": 800, "ggsnamespace": 6, "ggslimit": 10,
+            "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata", "iiurlwidth": 400,
+            "iiextmetadatafilter": "Artist|LicenseShortName|ImageDescription",
+        }
+        try:
+            r = requests.get(COMMONS_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
+            pages = (r.json().get("query") or {}).get("pages") or {}
+        except (requests.RequestException, ValueError) as ex:
+            raise RuntimeError(_short_error(COMMONS_URL, ex))
+        for pg in pages.values():
+            info = (pg.get("imageinfo") or [None])[0]
+            if not info or pg.get("pageid") in seen:
+                continue
+            thumb = info.get("thumburl") or ""
+            host = thumb.split("/")[2] if thumb.startswith("https://") else ""
+            if host != "upload.wikimedia.org" or info.get("mime") not in ("image/jpeg", "image/png"):
+                continue
+            if (info.get("width") or 0) < 500:
+                continue
+            meta = info.get("extmetadata") or {}
+            seen.add(pg.get("pageid"))
+            found.append((pg.get("index", 99), order, {
+                "thumb": thumb, "page": info.get("descriptionurl"),
+                "title": _plain(pg.get("title", "")).replace("File:", "")[:120],
+                "caption": _plain((meta.get("ImageDescription") or {}).get("value"))[:160],
+                "by": _plain((meta.get("Artist") or {}).get("value"))[:80] or "Unknown",
+                "license": _plain((meta.get("LicenseShortName") or {}).get("value")) or "See page",
+            }))
+    found.sort(key=lambda x: (x[0], x[1]))
+    return [f[2] for f in found[:limit]]
 
 
-@app.get("/api/walks/<int:osm_id>/google")
-def api_google(osm_id):
-    if not GOOGLE_KEY:
-        return jsonify(error="Google reviews are not set up (no API key)."), 404
-    row = db().execute("SELECT name, lat, lon FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
+@app.get("/api/walks/<int:osm_id>/photos")
+def api_photos(osm_id):
+    row = db().execute("SELECT geom FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
     if not row:
         abort(404)
-    if not google_rate_ok("lookup"):
-        return jsonify(error="Too many Google lookups just now. Try again in a minute."), 429
+    if not rate_ok("photos", PHOTOS_PER_MIN):
+        return jsonify(error="Too many photo lookups just now. Try again in a minute."), 429
     try:
-        return jsonify(google_lookup(row["name"], row["lat"], row["lon"]))
+        chain = json.loads(row["geom"])[0]
+        return jsonify(photos=commons_photos(chain))
     except RuntimeError as ex:
-        return jsonify(error=str(ex)), 502
+        return jsonify(error="Photo service problem: %s" % ex), 502
 
 
-@app.get("/api/gphoto")
-def api_gphoto():
-    if not GOOGLE_KEY:
+@app.put("/api/walks/<int:osm_id>/note")
+def api_note(osm_id):
+    b = request.get_json(silent=True) or {}
+    rating = b.get("rating")
+    if rating is not None:
+        try:
+            rating = int(rating)
+        except (TypeError, ValueError):
+            return jsonify(error="Rating must be 1 to 5"), 400
+        if not 1 <= rating <= 5:
+            return jsonify(error="Rating must be 1 to 5"), 400
+    note = str(b.get("note") or "").strip()[:2000] or None
+    conn = db()
+    cur = conn.execute("UPDATE walks SET my_rating=?, my_note=? WHERE osm_id=?", (rating, note, osm_id))
+    conn.commit()
+    if not cur.rowcount:
         abort(404)
-    name = request.args.get("name", "")
-    if not PHOTO_NAME.match(name):
-        abort(400)
-    width = max(100, min(request.args.get("w", 400, type=int), 1200))
-    if not google_rate_ok("photo"):
-        abort(429)
-    try:
-        r = requests.get("https://places.googleapis.com/v1/%s/media" % name,
-                         params={"maxWidthPx": width, "skipHttpRedirect": "true"},
-                         headers={"X-Goog-Api-Key": GOOGLE_KEY}, timeout=20)
-        uri = r.json().get("photoUri") if r.status_code == 200 else None
-        host = uri.split("/")[2] if uri and uri.startswith("https://") else ""
-        if not (host.endswith(".googleusercontent.com") or host.endswith(".ggpht.com")):
-            abort(502)
-        img = requests.get(uri, timeout=20)
-    except (requests.RequestException, ValueError):
-        abort(502)
-    if img.status_code != 200 or len(img.content) > 6 * 1024 * 1024:
-        abort(502)
-    return Response(img.content, mimetype=img.headers.get("Content-Type", "image/jpeg"),
-                    headers={"Cache-Control": "private, max-age=300"})
+    return jsonify(ok=True, my_rating=rating, my_note=note)
 
 
 # --------------------------------------------------------------------------
