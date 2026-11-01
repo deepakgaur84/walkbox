@@ -565,6 +565,26 @@ wb.overpass = fake_overpass; wb._places_cache.clear()
 page = c.get("/").data
 assert b'id="info"' in page and b"renderPlaces" in page and b"openWalk" in page
 
+# --- Swap start / end: reversed GPX and reversed turn-by-turn
+fw = c.get("/walks/%d.gpx" % nz_id); rw = c.get("/walks/%d.gpx?reverse=1" % nz_id)
+f_pts = ET.fromstring(fw.data).findall(".//g:trkpt", ns); r_pts = ET.fromstring(rw.data).findall(".//g:trkpt", ns)
+assert len(f_pts) == len(r_pts) > 2
+assert (f_pts[0].get("lat"), f_pts[0].get("lon")) == (r_pts[-1].get("lat"), r_pts[-1].get("lon"))      # start and end swapped
+assert (f_pts[-1].get("lat"), f_pts[-1].get("lon")) == (r_pts[0].get("lat"), r_pts[0].get("lon"))
+assert "(reversed)" in rw.data.decode() and "(reversed)" not in fw.data.decode()
+assert "reversed" in rw.headers["Content-Disposition"] and "reversed" not in fw.headers["Content-Disposition"]
+assert c.get("/walks/%d.gpx?reverse=0" % nz_id).data == fw.data
+real_post2 = wb.requests.post
+sent = []
+wb.requests.post = lambda url, **kw: (sent.append(kw["json"]) or Resp(VALHALLA_OK))
+c.post("/api/route", json={"mode": "along", "walk_id": nz_id})
+c.post("/api/route", json={"mode": "along", "walk_id": nz_id, "reverse": True})
+fwd, rev = sent[-2]["shape"], sent[-1]["shape"]
+assert fwd[0] == rev[-1] and fwd[-1] == rev[0] and len(fwd) == len(rev) > 2
+wb.requests.post = real_post2
+page = c.get("/").data
+assert b'id="revbtn"' in page and b"reverseWalk" in page and b"reverse=1" in page
+
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data

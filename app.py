@@ -737,8 +737,10 @@ def fetch_relations_by_ids(ids):
 # --------------------------------------------------------------------------
 # GPX
 # --------------------------------------------------------------------------
-def build_gpx(row):
+def build_gpx(row, reverse=False):
     chains = json.loads(row["geom"])
+    if reverse:
+        chains = [c[::-1] for c in chains]
     source = row["source"] or "osm-route"
     attribution = ATTRIBUTION.get(source, ATTRIBUTION["osm-route"])
     desc_parts = []
@@ -771,17 +773,18 @@ def build_gpx(row):
                    "nz-track": "https://www.herengaanuku.govt.nz/",
                    "import": "https://www.openstreetmap.org/copyright"}.get(
         source, "https://opendatacommons.org/licenses/odbl/")
+    title = row["name"] + (" (reversed)" if reverse else "")
     out = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="walkbox" xmlns="http://www.topografix.com/GPX/1/1">',
         "<metadata>",
-        "<name>%s</name>" % escape(row["name"]),
+        "<name>%s</name>" % escape(title),
         "<desc>%s</desc>" % escape(desc),
         '<link href="%s"><text>%s</text></link>' % (escape(link), escape(link_text)),
         '<copyright author="%s"><license>%s</license></copyright>' % (escape(author), license_url),
         "</metadata>",
         "<trk>",
-        "<name>%s</name>" % escape(row["name"]),
+        "<name>%s</name>" % escape(title),
         "<desc>%s</desc>" % escape(desc),
     ]
     for chain in chains:
@@ -983,9 +986,11 @@ def download_gpx(osm_id):
     row = db().execute("SELECT * FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
     if not row:
         abort(404)
+    rev = request.args.get("reverse") == "1"
+    fname = safe_filename(row["name"] + (" reversed" if rev else ""), osm_id)
     return Response(
-        build_gpx(row), mimetype="application/gpx+xml",
-        headers={"Content-Disposition": 'attachment; filename="%s"' % safe_filename(row["name"], osm_id)},
+        build_gpx(row, reverse=rev), mimetype="application/gpx+xml",
+        headers={"Content-Disposition": 'attachment; filename="%s"' % fname},
     )
 
 
@@ -1116,6 +1121,8 @@ def api_route():
             if not row:
                 return jsonify(error="That walk is not in your box."), 404
             chain = simplify(json.loads(row["geom"])[0], 400)
+            if b.get("reverse"):
+                chain = chain[::-1]
             payload = {"shape": [{"lat": p[0], "lon": p[1]} for p in chain], "costing": "pedestrian",
                        "shape_match": "map_snap", "directions_options": opts}
             data = valhalla_call("/trace_route", payload)

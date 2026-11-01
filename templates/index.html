@@ -38,6 +38,8 @@
   #info .sec { font-weight:600; margin-top:8px; }
   .poi { width:24px; height:24px; border-radius:50%; background:#fff; border:2px solid #555; text-align:center; line-height:19px; font-size:13px; box-sizing:border-box; }
   @media (max-width:800px) { #info { width:calc(100% - 24px); max-height:38%; } }
+  #revbtn { position:absolute; top:10px; right:12px; z-index:900; display:none; background:#fff; border:0; border-radius:20px; padding:7px 14px; font-size:13px; font-weight:600; color:var(--brand); box-shadow:0 1px 6px rgba(0,0,0,.3); cursor:pointer; }
+  #revbtn.on { background:var(--brand); color:#fff; }
   .arr { width:18px; height:18px; border-radius:50%; background:#fff; border:2px solid #1b5e20; color:#1b5e20; font-size:9px; line-height:14px; text-align:center; box-sizing:border-box; }
   .pin { width:20px; height:20px; border-radius:50%; border:3px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.6); box-sizing:border-box; }
   .pin.start { background:linear-gradient(90deg,#1b5e20 50%,#222 50%); }
@@ -130,6 +132,7 @@
     <div id="livebar"></div>
     <div id="elev"></div>
     <div id="info"></div>
+    <button id="revbtn" title="Walk it the other way round: the start and end swap places">⇄ Swap start / end</button>
   </div>
 </main>
 
@@ -369,6 +372,15 @@ function elevAt(p, dKm) {                     // interpolate the profile at a di
   const t = (dKm - d[lo]) / ((d[hi] - d[lo]) || 1); return e[lo] + t * (e[hi] - e[lo]);
 }
 function fmtDist(m) { return m < 950 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
+function reverseProfile(p) {                  // the elevation profile walked from the other end
+  const T = p.total_km;
+  return Object.assign({}, p, {dist_km: p.dist_km.map(d => +(T - d).toFixed(3)).reverse(), elev_m: p.elev_m.slice().reverse()});
+}
+function reversePlaces(d) {                   // 'km along' measured from the other end, in walking order
+  const T = d.total_km;
+  const places = d.places.map(p => Object.assign({}, p, {along_km: +(T - p.along_km).toFixed(2)})).sort((a, b) => a.along_km - b.along_km);
+  return Object.assign({}, d, {places});
+}
 // END NAV
 
 let routeLayer = null;
@@ -408,7 +420,7 @@ function routeToStart(r, out, btn) {
 // ---- Selected walk: styled route, live GPS dot and elevation profile ----
 let sel = null;   // the walk currently shown in "navigation view"
 function clearSelection() {
-  const inf = $('info'); inf.style.display = 'none'; inf.textContent = '';
+  const inf = $('info'); inf.style.display = 'none'; inf.textContent = ''; $('revbtn').style.display = 'none';
   if (!sel) return;
   if (sel.watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(sel.watchId);
   sel.layers.forEach(l => map.removeLayer(l));
@@ -443,6 +455,7 @@ function selectWalk(r) {
   add(L.marker(chain[chain.length - 1], {icon: icon('<div class="pin end">⚑</div>', 20), interactive: false, keyboard: false}));
   map.fitBounds(L.featureGroup(paths).getBounds(), {paddingTopLeft: [40, 50], paddingBottomRight: [40, 150], animate: false});
   drawArrows(s);
+  const rb = $('revbtn'); rb.style.display = 'block'; rb.className = r.reversed ? 'on' : ''; rb.textContent = r.reversed ? '⇄ Reversed: tap to restore' : '⇄ Swap start / end';
   loadProfile(s);
   loadInfo(s);
   startLive(s);
@@ -515,7 +528,7 @@ function loadInfo(s) {
     .then(w => { if (sel === s) { wbox.textContent = ''; wbox.className = ''; renderWeather(wbox, w); } })
     .catch(e => { if (sel === s) wbox.textContent = e.message; });
   fetch('/api/walks/' + s.r.osm_id + '/places').then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Places failed'); return j; })
-    .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, d); } })
+    .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, s.r.reversed ? reversePlaces(d) : d); } })
     .catch(e => { if (sel === s) pbox.textContent = e.message; });
 }
 
@@ -526,7 +539,7 @@ async function loadProfile(s) {
     const resp = await fetch('/api/walks/' + s.r.osm_id + '/profile'); const j = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(j.error || ('Failed (' + resp.status + ')'));
     if (sel !== s) return;
-    s.profile = j; drawProfile(s); if (s.along !== undefined && s.along !== null) setProgress(s);
+    s.profile = s.r.reversed ? reverseProfile(j) : j; drawProfile(s); if (s.along !== undefined && s.along !== null) setProgress(s);
   } catch (e) { if (sel === s) { msg.textContent = e.message; addClose(el); } }
 }
 function addClose(el) { const x = document.createElement('button'); x.className = 'elx'; x.textContent = '×'; x.title = 'Close'; x.onclick = clearSelection; el.appendChild(x); }
@@ -620,7 +633,7 @@ function makeNav(r) {
     rb.appendChild(b1);
     if (r.added) {
       const b2 = document.createElement('button'); b2.className = 'b alt'; b2.style.cssText = 'padding:4px 10px;font-size:13px'; b2.textContent = 'Turn-by-turn along this walk';
-      b2.onclick = () => getRoute({mode: 'along', walk_id: r.osm_id}, out, b2, 'Along the walk');
+      b2.onclick = () => getRoute({mode: 'along', walk_id: r.osm_id, reverse: !!r.reversed}, out, b2, 'Along the walk');
       rb.appendChild(b2);
     }
     panel.append(rb, out);
@@ -723,7 +736,7 @@ function render(keep) {
     item.appendChild(body);
     if (r.added) {
       const acts = document.createElement('div'); acts.className = 'acts';
-      const a = document.createElement('a'); a.className = 'dl'; a.href = '/walks/' + r.osm_id + '.gpx'; a.textContent = 'Download GPX';
+      const a = document.createElement('a'); a.className = 'dl'; a.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); a.textContent = 'Download GPX';
       a.onclick = e => e.stopPropagation(); acts.appendChild(a);
       if (mode === 'box') { const b = document.createElement('button'); b.className = 'del'; b.textContent = 'Remove'; b.onclick = e => { e.stopPropagation(); del(r.osm_id); }; acts.appendChild(b); }
       item.appendChild(acts);
@@ -739,6 +752,13 @@ function render(keep) {
   if (mode === 'box' && all.length) map.fitBounds(L.featureGroup(all).getBounds(), {padding:[30,30], maxZoom: 14});
   if (keep && sel) { const el = $('w' + sel.r.osm_id); if (el) el.classList.add('sel'); if (lines[sel.r.osm_id]) lines[sel.r.osm_id].setStyle({opacity: 0}); }
 }
+function reverseWalk(id) {              // walk the same route the other way round
+  const r = results.find(x => x.osm_id == id); if (!r || !r.line) return;
+  r.line = r.line.map(c => c.slice().reverse()); r.reversed = !r.reversed;
+  render();                                // rebuilds cards, links and lines for the new direction
+  focus(id);
+}
+$('revbtn').onclick = () => { if (sel) reverseWalk(sel.r.osm_id); };
 const loadingIds = new Set();
 async function openWalk(id) {          // routes are fetched only when a walk is clicked
   const r = results.find(x => x.osm_id == id); if (!r) return;

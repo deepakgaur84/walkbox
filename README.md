@@ -49,6 +49,10 @@ Click any walk in the list and the map switches to a navigation-style view:
   (or how far you are from the line when you are off it). Your browser asks for location permission the first time, and the page needs the https address;
 - an **elevation profile** runs along the bottom with a blue dot at your position along the route. Touch or hover the chart to see the distance and height at
   that point, and the same spot is shown on the map. Heights come from the free Open-Meteo elevation service (approximate) and are saved after the first lookup;
+- the **⇄ Swap start / end** button (top right of the map) walks the same route the other way round: the start and end markers and arrows swap, the elevation
+  profile, "km done / to go" and the places list are measured from the new start, and the Navigate links, turn-by-turn "along this walk" and the
+  **Download GPX** button all use the new direction (a downloaded GPX is named "(reversed)"). It is a view setting, so the walk is stored unchanged;
+  press the button again to restore it;
 - the × button closes the view and stops the GPS.
 
 The page must stay open with the screen on for the live dot to update; browsers pause web pages in the background.
