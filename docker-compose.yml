@@ -10,6 +10,9 @@ services:
       DB_PATH: /data/walkbox.db
       MAX_SPAN_DEG: "0.5"
       MAX_RESULTS: "150"
+      # Optional: Google Places API key for reviews and photos. Set it in Dockhand's environment
+      # variables for this stack. Leave blank to hide the Google button.
+      GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
     # Public DNS so the container can reach the OpenStreetMap servers.
     dns:
       - 1.1.1.1

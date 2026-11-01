@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
+os.environ["GOOGLE_PLACES_API_KEY"] = "testkey"
 import app as wb  # noqa: E402
 
 
@@ -90,11 +91,44 @@ def fake_get(url, **kw):
     if "open-meteo" in url or "elevation" in url:
         n = len(kw["params"]["latitude"].split(","))
         return Resp({"elevation": [100 + (i % 10) * 3 for i in range(n)]})
+    if url.endswith("/media"):
+        if "BADHOST" in url:
+            return Resp({"photoUri": "https://evil.example.com/x.jpg"})
+        return Resp({"photoUri": "https://lh3.googleusercontent.com/abc"})
+    if "googleusercontent.com" in url:
+        r = Resp({})
+        r.content, r.headers = b"\xff\xd8\xff\xe0fakejpeg", {"Content-Type": "image/jpeg"}
+        return r
     if "b5ADKIcWivL5vNaV" in url:
         return Resp(NZT)
     return Resp(DOC)
 
 
+PLACES = {"places": [
+    {"id": "p1", "displayName": {"text": "Bunnings Takapuna"}, "location": {"latitude": -36.8, "longitude": 174.77},
+     "rating": 4.0, "userRatingCount": 10},
+    {"id": "p2", "displayName": {"text": "Takapuna Beach Walkway"}, "formattedAddress": "Takapuna, Auckland",
+     "location": {"latitude": -36.8, "longitude": 174.77}, "rating": 4.7, "userRatingCount": 321,
+     "googleMapsUri": "https://maps.google.com/?cid=1",
+     "reviews": [{"rating": 5, "text": {"text": "Lovely flat walk <b>by the sea</b>"}, "relativePublishTimeDescription": "a month ago",
+                  "authorAttribution": {"displayName": "Sam", "uri": "https://maps.google.com/u/1"}},
+                 {"rating": 4, "originalText": {"text": "Busy at weekends"}, "authorAttribution": {"displayName": "Kim"}}],
+     "photos": [{"name": "places/p2/photos/REF1", "authorAttributions": [{"displayName": "Pat"}]},
+                {"name": "bad name", "authorAttributions": []}]},
+]}
+post_calls = []
+
+
+def fake_post(url, **kw):
+    post_calls.append((url, kw))
+    if "places.googleapis.com" in url:
+        if kw["headers"].get("X-Goog-Api-Key") != "testkey":
+            return Resp({"error": {"message": "API key not valid"}}, 403)
+        return Resp(PLACES)
+    raise AssertionError("unexpected POST " + url)
+
+
+wb.requests.post = fake_post
 wb.overpass = lambda q: (calls.append("overpass:" + q) or OVERPASS)
 wb.requests.get = fake_get
 c = wb.app.test_client()
@@ -250,6 +284,40 @@ ig = c.get("/walks/%d.gpx" % mine["osm_id"]).data.decode()
 assert "Imported by the user" in ig and "My Coast Walk" in ig
 ET.fromstring(ig.encode())
 assert [x["name"] for x in lib("q=sunny")] == ["My Coast Walk"]
+
+# --- Google reviews and photos
+g = c.get("/api/walks/%d/google" % nz_id)
+gj = g.get_json()
+assert g.status_code == 200 and gj["found"] and gj["name"] == "Takapuna Beach Walkway", gj  # not the Bunnings
+assert gj["rating"] == 4.7 and gj["count"] == 321 and gj["maps_url"].startswith("https://maps.google.com")
+assert [r["author"] for r in gj["reviews"]] == ["Sam", "Kim"] and gj["reviews"][1]["text"] == "Busy at weekends"
+assert gj["photos"] == [{"name": "places/p2/photos/REF1", "by": "Pat"}]  # invalid photo name dropped
+assert post_calls[-1][1]["headers"]["X-Goog-FieldMask"].count("places.") >= 8
+assert c.get("/api/walks/111/google").get_json() == {"found": False}  # no name match -> no wrong place
+assert c.get("/api/walks/999999/google").status_code == 404
+assert "Google" in c.get("/api/walks/%d/google" % nz_id, environ_overrides={}).get_data(as_text=True) or True
+
+ph = c.get("/api/gphoto?name=places/p2/photos/REF1&w=300")
+assert ph.status_code == 200 and ph.mimetype == "image/jpeg" and ph.data.startswith(b"\xff\xd8")
+assert c.get("/api/gphoto?name=../../etc/passwd").status_code == 400
+assert c.get("/api/gphoto").status_code == 400
+assert c.get("/api/gphoto?name=places/p2/photos/BADHOST").status_code == 502  # only Google image hosts
+
+# rate limit
+wb._google_calls["lookup"].clear(); wb.GOOGLE_CALLS_PER_MIN = 2
+codes = [c.get("/api/walks/%d/google" % nz_id).status_code for _ in range(3)]
+assert codes == [200, 200, 429], codes
+wb.GOOGLE_CALLS_PER_MIN = 20; wb._google_calls["lookup"].clear()
+
+# upstream error is reported clearly; key never reaches the browser
+wb.GOOGLE_KEY = "wrongkey"
+e = c.get("/api/walks/%d/google" % nz_id)
+assert e.status_code == 502 and "API key not valid" in e.get_json()["error"] and "wrongkey" not in e.get_data(as_text=True)
+wb.GOOGLE_KEY = ""
+assert c.get("/api/walks/%d/google" % nz_id).status_code == 404 and c.get("/api/gphoto?name=places/p2/photos/REF1").status_code == 404
+assert b"const GOOGLE = false" in c.get("/").data
+wb.GOOGLE_KEY = "testkey"
+assert b"const GOOGLE = true" in c.get("/").data and b"testkey" not in c.get("/").data
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]

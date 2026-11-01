@@ -34,6 +34,11 @@
   .src { font-size:13px; color:var(--mute); display:flex; align-items:center; gap:4px; }
   .chip { display:inline-block; font-size:12px; background:var(--brand2); color:var(--brand); padding:1px 8px; border-radius:10px; margin:2px 4px 0 0; }
   .chip.warn { background:#fdecea; color:var(--warn); }
+  .gpanel { margin-top:8px; padding:8px; background:#fafbf9; border:1px solid var(--line); border-radius:8px; font-size:13px; cursor:default; }
+  .gpanel .ph { display:flex; gap:6px; overflow-x:auto; margin:6px 0; }
+  .gpanel .ph img { height:90px; border-radius:6px; flex:none; }
+  .gpanel .rv { border-top:1px solid var(--line); padding:6px 0; }
+  .gpanel .att { font-size:11px; color:var(--mute); margin-top:4px; }
   .badge { font-size:11px; background:var(--brand2); color:var(--brand); padding:1px 7px; border-radius:10px; margin-left:6px; }
   .acts { display:flex; flex-direction:column; gap:4px; align-items:flex-end; }
   .acts a, .acts button { font-size:13px; }
@@ -90,6 +95,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const MAX_SPAN = {{ max_span }};
+const GOOGLE = {{ 'true' if google_enabled else 'false' }};
 let mode = 'find';
 let results = [];
 const selected = new Set();
@@ -209,6 +215,42 @@ $('importFile').onchange = async () => {
   $('importFile').value = '';
 };
 
+async function toggleGoogle(r, btn, panel) {
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = ''; panel.className = 'gpanel'; panel.onclick = e => e.stopPropagation();
+  if (panel.dataset.loaded) return;
+  panel.textContent = 'Loading from Google Maps…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/walks/' + r.osm_id + '/google'); const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(j.error || ('Failed (' + resp.status + ')'));
+    panel.textContent = '';
+    if (!j.found) { panel.textContent = 'No matching Google Maps listing found for this walk.'; }
+    else {
+      const head = document.createElement('div');
+      const a = document.createElement('a'); a.href = j.maps_url || '#'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = j.name || 'View on Google Maps';
+      head.append(a, document.createTextNode(j.rating ? '  ★ ' + j.rating + (j.count ? ' (' + j.count + ' reviews)' : '') : ''));
+      panel.appendChild(head);
+      if (j.address) { const ad = document.createElement('div'); ad.className = 'att'; ad.textContent = j.address; panel.appendChild(ad); }
+      if (j.photos.length) {
+        const ph = document.createElement('div'); ph.className = 'ph';
+        j.photos.forEach(p => { const im = document.createElement('img'); im.loading = 'lazy'; im.alt = 'Photo from Google Maps'; im.title = p.by ? 'Photo: ' + p.by : 'Google Maps photo'; im.src = '/api/gphoto?name=' + encodeURIComponent(p.name) + '&w=400'; ph.appendChild(im); });
+        panel.appendChild(ph);
+      }
+      j.reviews.forEach(rv => {
+        const d = document.createElement('div'); d.className = 'rv';
+        const who = document.createElement(rv.author_url ? 'a' : 'span'); who.textContent = rv.author; if (rv.author_url) { who.href = rv.author_url; who.target = '_blank'; who.rel = 'noopener'; }
+        d.append(who, document.createTextNode('  ' + '★'.repeat(Math.round(rv.rating || 0)) + (rv.when ? '  ' + rv.when : '')));
+        if (rv.text) { const t = document.createElement('div'); t.textContent = rv.text; d.appendChild(t); }
+        panel.appendChild(d);
+      });
+      if (!j.reviews.length) { const n = document.createElement('div'); n.className = 'att'; n.textContent = 'No written reviews were returned.'; panel.appendChild(n); }
+      const at = document.createElement('div'); at.className = 'att'; at.textContent = 'Reviews and photos from Google Maps. Shown live, not saved. Up to 5 reviews are provided by Google.'; panel.appendChild(at);
+    }
+    panel.dataset.loaded = '1';
+  } catch (e) { panel.textContent = e.message; }
+  btn.disabled = false;
+}
+
 async function del(id) {
   if (!confirm('Remove this walk from your box?')) return;
   await fetch('/api/walks/' + id, {method:'DELETE'}); loadBox();
@@ -238,6 +280,13 @@ function render() {
     chip(r.source_label);
     if (r.ref) chip('ref ' + r.ref);
     body.appendChild(chips);
+    if (GOOGLE && mode === 'box') {
+      const gb = document.createElement('button'); gb.className = 'b alt'; gb.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px';
+      gb.textContent = 'Google reviews & photos';
+      const panel = document.createElement('div'); panel.style.display = 'none';
+      gb.onclick = e => { e.stopPropagation(); toggleGoogle(r, gb, panel); };
+      body.append(gb, panel);
+    }
     if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
     if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
     item.appendChild(body);

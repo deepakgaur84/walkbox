@@ -15,6 +15,23 @@ Pick any combination when you search:
 - **Official routes**: named walking route relations in OpenStreetMap. ODbL.
 - **Named paths**: named footpaths in OpenStreetMap, grouped by name into one walk (paths shorter than `MIN_PATH_KM` are ignored). ODbL.
 
+## Google Maps reviews and photos (optional)
+
+In **My walk box** each walk gets a **Google reviews & photos** button when a Google API key is set. It looks up the matching
+Google Maps place (the name must closely match the walk's name) and shows the rating, up to 5 reviews and up to 8 photos.
+Everything is fetched live when you click and is never saved, because Google's terms do not allow storing it.
+The match can be a different place from the walk (for example the beach itself), so the Google place name is always shown.
+
+Set up (once):
+1. Google Cloud console > create a project and link a billing account (Places API is billed; set a budget alert).
+2. APIs & Services > Library > enable **Places API (New)**.
+3. APIs & Services > Credentials > Create credentials > API key. Under "API restrictions" restrict it to **Places API (New)**.
+4. APIs & Services > Places API (New) > Quotas: set a daily request cap.
+5. In Dockhand, add an environment variable `GOOGLE_PLACES_API_KEY` to the stack and redeploy.
+
+Walkbox also limits itself to `GOOGLE_CALLS_PER_MINUTE` (20) lookups and `GOOGLE_PHOTOS_PER_MINUTE` (80) photos. The key stays on the server and is never sent to the browser.
+Walkbox has no login, so anyone who can open the page can trigger lookups on your key: keep authentication on the proxy rule.
+
 ## Importing your own GPX files
 
 In **My walk box** press **Import GPX** and choose one or more `.gpx` files (for example trails you have downloaded yourself).
@@ -45,6 +62,7 @@ To update after code changes: push to `main`, wait for the green tick on the Act
 | DB_PATH | /data/walkbox.db | Where the database is stored. |
 | MAX_SPAN_DEG | 0.5 | Largest map area searched (degrees, about 55 km). |
 | MAX_RESULTS | 150 | Most routes returned per search. |
+| GOOGLE_PLACES_API_KEY | (blank) | Enables the Google reviews and photos button. |
 | MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
 | MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
 | MIN_PATH_KM | 0.8 | Shortest named path (grouped by name) listed as a walk. |
