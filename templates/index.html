@@ -595,10 +595,11 @@ function startLive(s) {
       s.me = L.marker([la, lo], {icon: L.divIcon({className: '', html: '<div class="me"></div>', iconSize: [22, 22], iconAnchor: [11, 11]}), zIndexOffset: 2000, interactive: false, keyboard: false}).addTo(map);
       s.acc = L.circle([la, lo], {radius: acc, color: '#1a73e8', weight: 1, fillOpacity: .1, interactive: false}).addTo(map);
       s.layers.push(s.me, s.acc);
-    } else { s.me.setLatLng([la, lo]); s.acc.setLatLng([la, lo]).setRadius(acc); }
+    } else { s.acc.setLatLng([la, lo]).setRadius(acc); }          // the faint ring stays on your true GPS position
     const a = alongRoute(la, lo, s.chain, s.cum), total = s.cum[s.cum.length - 1];
     const near = a.off < Math.max(50, acc);
     s.along = near ? a.along : null;
+    s.me.setLatLng(near ? pointAt(s.chain, s.cum, a.along) : [la, lo]);   // the dot sits on the path while you are on the route
     bar.className = near ? 'ok' : 'off';
     if (near) {
       const km = s.profile ? s.profile.total_km : total / 1000, done = km * a.along / total;

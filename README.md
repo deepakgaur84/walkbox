@@ -45,7 +45,7 @@ When a walk is open, a **Weather & nearby** card appears on the map:
 Click any walk in the list and the map switches to a navigation-style view:
 
 - the route is drawn as a thick green line with direction arrows, a start marker and an end flag;
-- a **live blue dot** follows your GPS position, with a bar at the top saying whether you are on the route, how many km you have done and how many are left
+- a **live blue dot** follows your GPS position (while you are on the route it sits on the green line, with a faint ring showing your true GPS position and its accuracy; if you wander off it shows where you really are), with a bar at the top saying whether you are on the route, how many km you have done and how many are left
   (or how far you are from the line when you are off it). Your browser asks for location permission the first time, and the page needs the https address;
 - an **elevation profile** runs along the bottom with a blue dot at your position along the route. Touch or hover the chart to see the distance and height at
   that point, and the same spot is shown on the map. Heights come from the free Open-Meteo elevation service (approximate) and are saved after the first lookup;
