@@ -46,6 +46,9 @@
   .navp { margin-top:6px; padding:8px; background:#f1f6f3; border:1px solid var(--line); border-radius:8px; font-size:13px; cursor:default; }
   .navp a, .navp button { display:inline-block; margin:2px 6px 2px 0; }
   .navp .live { margin-top:4px; font-weight:600; }
+  .steps { margin:6px 0 0; padding-left:20px; font-size:13px; }
+  .steps li { margin:3px 0; cursor:pointer; }
+  .steps li small { color:var(--mute); }
   .badge { font-size:11px; background:var(--brand2); color:var(--brand); padding:1px 7px; border-radius:10px; margin-left:6px; }
   .acts { display:flex; flex-direction:column; gap:4px; align-items:flex-end; }
   .acts a, .acts button { font-size:13px; }
@@ -102,6 +105,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const MAX_SPAN = {{ max_span }};
+const ROUTING = {{ 'true' if routing_enabled else 'false' }};
 let mode = 'find';
 let results = [];
 const selected = new Set();
@@ -117,7 +121,7 @@ const $ = id => document.getElementById(id);
 function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 
 function setMode(m) {
-  mode = m; if (typeof stopTracking === 'function') stopTracking();
+  mode = m; if (typeof stopTracking === 'function') stopTracking(); if (typeof clearRoute === 'function') clearRoute();
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
   $('findTools').style.display = m === 'find' ? '' : 'none';
@@ -271,6 +275,40 @@ function distToRoute(lat, lon, lines) {   // metres from a point to the nearest 
 }
 // END NAV
 
+let routeLayer = null;
+function clearRoute() { if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; } }
+async function getRoute(body, out, btn, label) {
+  btn.disabled = true; out.textContent = 'Working out the route…'; out.style.color = '';
+  try {
+    const resp = await fetch('/api/route', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(j.error || ('Routing failed (' + resp.status + ')'));
+    clearRoute();
+    routeLayer = L.polyline(j.shape, {color: '#1a73e8', weight: 6, opacity: .85}).addTo(map);
+    map.fitBounds(routeLayer.getBounds(), {padding: [30, 30]});
+    out.textContent = '';
+    const head = document.createElement('div'); head.style.fontWeight = '600';
+    head.textContent = label + ': ' + j.distance_km.toFixed(1) + ' km, about ' + j.minutes + ' min on foot'; out.appendChild(head);
+    const ol = document.createElement('ol'); ol.className = 'steps';
+    j.steps.forEach(st => {
+      const li = document.createElement('li'); li.textContent = st.text + ' ';
+      if (st.km) { const sm = document.createElement('small'); sm.textContent = '(' + st.km.toFixed(2) + ' km)'; li.appendChild(sm); }
+      if (st.at) li.onclick = () => map.setView(st.at, 17);
+      ol.appendChild(li);
+    });
+    out.appendChild(ol);
+  } catch (e) { out.textContent = e.message; out.style.color = 'var(--warn)'; }
+  btn.disabled = false;
+}
+function routeToStart(r, out, btn) {
+  if (!navigator.geolocation) { out.textContent = 'Location is not available in this browser.'; return; }
+  out.textContent = 'Finding your position…';
+  navigator.geolocation.getCurrentPosition(
+    pos => getRoute({mode: 'to_start', from: [pos.coords.latitude, pos.coords.longitude], to: r.line[0][0]}, out, btn, 'To the start'),
+    err => { out.textContent = 'Could not get your position: ' + err.message; },
+    {enableHighAccuracy: true, timeout: 20000});
+}
+
 let watchId = null, meMarker = null, meCircle = null;
 function stopTracking() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
@@ -312,6 +350,19 @@ function makeNav(r) {
   const tb = document.createElement('button'); tb.className = 'b alt'; tb.style.cssText = 'padding:4px 10px;font-size:13px'; tb.textContent = 'Show my position on this route';
   tb.onclick = () => { if (watchId !== null) { stopTracking(); tb.textContent = 'Show my position on this route'; live.textContent = ''; } else startTracking(r, live, tb); };
   panel.append(note, tb, live);
+  if (ROUTING) {
+    const rb = document.createElement('div'); rb.style.marginTop = '8px';
+    const out = document.createElement('div'); out.style.fontSize = '13px';
+    const b1 = document.createElement('button'); b1.className = 'b alt'; b1.style.cssText = 'padding:4px 10px;font-size:13px;margin-right:6px'; b1.textContent = 'Turn-by-turn to the start';
+    b1.onclick = () => routeToStart(r, out, b1);
+    rb.appendChild(b1);
+    if (r.added) {
+      const b2 = document.createElement('button'); b2.className = 'b alt'; b2.style.cssText = 'padding:4px 10px;font-size:13px'; b2.textContent = 'Turn-by-turn along this walk';
+      b2.onclick = () => getRoute({mode: 'along', walk_id: r.osm_id}, out, b2, 'Along the walk');
+      rb.appendChild(b2);
+    }
+    panel.append(rb, out);
+  }
   btn.onclick = e => { e.stopPropagation(); panel.style.display = panel.style.display === 'none' ? '' : 'none'; };
   wrap.append(btn, panel);
   return wrap;

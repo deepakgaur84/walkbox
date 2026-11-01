@@ -28,6 +28,14 @@ Every walk card has a **Navigate** button:
   you are, and how far you are from the start. It uses your browser's location, so it needs the https address and location permission,
   and the page must stay open. It does not give turn-by-turn spoken directions.
 
+- **Turn-by-turn to the start** and **Turn-by-turn along this walk** (inside Walkbox, no phone app needed) use a self-hosted
+  [Valhalla](https://github.com/valhalla/valhalla) routing engine that runs as the `walkbox-valhalla` container in the same stack.
+  It covers **New Zealand only** (change `tile_urls` to another [Geofabrik](https://download.geofabrik.de/) extract to cover another region).
+  The first start downloads the NZ map and builds routing tiles, which takes a while and needs a few GB of free disk; watch the
+  container log. Until it finishes, the buttons show a "not reachable yet" message. Directions are shown as a list of steps and a blue
+  line on the map; they are not spoken, and there is no automatic rerouting.
+  "Along this walk" snaps the walk's track to the path network, so it can fail on short or unmapped tracks.
+
 For turn-by-turn use on the trail, download the GPX and open it in an offline app (OsmAnd, Organic Maps or similar).
 
 ## Photos and your own notes
@@ -72,6 +80,7 @@ To update after code changes: push to `main`, wait for the green tick on the Act
 | MAX_SPAN_DEG | 0.5 | Largest map area searched (degrees, about 55 km). |
 | MAX_RESULTS | 150 | Most routes returned per search. |
 | PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |
+| VALHALLA_URL | (blank) | Address of the Valhalla routing engine; blank hides the turn-by-turn buttons. |
 | MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
 | MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
 | MIN_PATH_KM | 0.8 | Shortest named path (grouped by name) listed as a walk. |

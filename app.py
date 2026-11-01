@@ -46,6 +46,7 @@ NZT_URL = os.environ.get(
 )
 COMMONS_URL = os.environ.get("COMMONS_URL", "https://commons.wikimedia.org/w/api.php")
 PHOTOS_PER_MIN = int(os.environ.get("PHOTOS_PER_MINUTE", "30"))
+VALHALLA_URL = os.environ.get("VALHALLA_URL", "").strip().rstrip("/")
 ELEVATION_URL = os.environ.get("ELEVATION_URL", "https://api.open-meteo.com/v1/elevation")
 DB_PATH = os.environ.get("DB_PATH", "/data/walkbox.db")
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
@@ -631,7 +632,7 @@ def public(walk, added=False, preview=True):
 
 @app.route("/")
 def index():
-    return render_template("index.html", max_span=MAX_SPAN_DEG)
+    return render_template("index.html", max_span=MAX_SPAN_DEG, routing_enabled=bool(VALHALLA_URL))
 
 
 @app.route("/healthz")
@@ -777,6 +778,120 @@ def download_zip():
         z.writestr("ATTRIBUTION.txt", "\n".join("Route data: " + ATTRIBUTION.get(u, ATTRIBUTION["osm-route"]) for u in sorted(used)) + "\n")
     return Response(buf.getvalue(), mimetype="application/zip",
                     headers={"Content-Disposition": 'attachment; filename="walkbox-walks.zip"'})
+
+
+# --------------------------------------------------------------------------
+# Turn-by-turn routing (self-hosted Valhalla, free, New Zealand extract)
+# --------------------------------------------------------------------------
+def decode_polyline6(encoded):
+    """Decode Valhalla's precision-6 encoded polyline into [(lat, lon), ...]."""
+    coords, index, lat, lon = [], 0, 0, 0
+    while index < len(encoded):
+        for axis in (0, 1):
+            shift = result = 0
+            while True:
+                b = ord(encoded[index]) - 63
+                index += 1
+                result |= (b & 0x1F) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            delta = ~(result >> 1) if result & 1 else result >> 1
+            if axis == 0:
+                lat += delta
+            else:
+                lon += delta
+        coords.append((lat / 1e6, lon / 1e6))
+    return coords
+
+
+def valhalla_call(path, payload):
+    if not VALHALLA_URL:
+        raise RuntimeError("Routing is not set up (no VALHALLA_URL).")
+    try:
+        r = requests.post(VALHALLA_URL + path, json=payload, timeout=60,
+                          headers={"User-Agent": USER_AGENT})
+    except requests.RequestException as ex:
+        raise RuntimeError("The routing engine is not reachable yet. If this is the first start it is "
+                           "still building the New Zealand map tiles (this can take a while). (%s)"
+                           % _short_error(VALHALLA_URL, ex))
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code != 200:
+        msg = data.get("error") or "HTTP %s" % r.status_code
+        code = data.get("error_code")
+        if code in (170, 171, 442, 443):
+            msg = "No walkable path found near those points. Routing covers New Zealand only."
+        raise RuntimeError(msg)
+    return data
+
+
+def shape_route(data):
+    trip = data.get("trip") or {}
+    shape, steps = [], []
+    for leg in trip.get("legs", []):
+        pts = decode_polyline6(leg.get("shape", ""))
+        offset = len(shape)
+        for m in leg.get("maneuvers", []):
+            i = m.get("begin_shape_index", 0)
+            at = pts[i] if i < len(pts) else (pts[-1] if pts else None)
+            steps.append({
+                "text": m.get("instruction") or m.get("verbal_pre_transition_instruction") or "",
+                "km": round(m.get("length", 0), 2), "min": round(m.get("time", 0) / 60.0, 1),
+                "type": m.get("type"), "at": list(at) if at else None,
+            })
+        shape.extend(pts[1:] if offset and pts else pts)
+    summ = trip.get("summary") or {}
+    return {"distance_km": round(summ.get("length", 0), 2), "minutes": round(summ.get("time", 0) / 60.0),
+            "shape": [list(p) for p in simplify(shape, 1500)], "steps": steps}
+
+
+@app.get("/api/route/status")
+def api_route_status():
+    if not VALHALLA_URL:
+        return jsonify(enabled=False, ready=False)
+    try:
+        r = requests.get(VALHALLA_URL + "/status", timeout=5)
+        return jsonify(enabled=True, ready=r.status_code == 200)
+    except requests.RequestException:
+        return jsonify(enabled=True, ready=False)
+
+
+def _pt(v):
+    lat, lon = float(v[0]), float(v[1])
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError
+    return {"lat": lat, "lon": lon}
+
+
+@app.post("/api/route")
+def api_route():
+    if not VALHALLA_URL:
+        return jsonify(error="Routing is not set up on this server."), 404
+    b = request.get_json(silent=True) or {}
+    opts = {"units": "kilometers", "language": "en-US"}
+    try:
+        if b.get("mode") == "to_start":
+            payload = {"locations": [_pt(b["from"]), _pt(b["to"])], "costing": "pedestrian",
+                       "directions_options": opts}
+            data = valhalla_call("/route", payload)
+        elif b.get("mode") == "along":
+            row = db().execute("SELECT geom FROM walks WHERE osm_id=?", (int(b["walk_id"]),)).fetchone()
+            if not row:
+                return jsonify(error="That walk is not in your box."), 404
+            chain = simplify(json.loads(row["geom"])[0], 400)
+            payload = {"shape": [{"lat": p[0], "lon": p[1]} for p in chain], "costing": "pedestrian",
+                       "shape_match": "map_snap", "directions_options": opts}
+            data = valhalla_call("/trace_route", payload)
+        else:
+            return jsonify(error="mode must be to_start or along"), 400
+    except (KeyError, TypeError, ValueError, IndexError):
+        return jsonify(error="Invalid request"), 400
+    except RuntimeError as ex:
+        return jsonify(error=str(ex)), 502
+    return jsonify(shape_route(data))
 
 
 # --------------------------------------------------------------------------

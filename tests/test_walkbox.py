@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
+os.environ["VALHALLA_URL"] = "http://valhalla:8002"
 import app as wb  # noqa: E402
 
 
@@ -304,6 +305,86 @@ c.put("/api/walks/%d/note" % nz_id, json={"rating": None, "note": ""})  # cleari
 w = next(x for x in lib("q=walkway") if x["osm_id"] == nz_id)
 assert w["my_rating"] is None and w["my_note"] is None
 c.put("/api/walks/%d/note" % nz_id, json={"rating": 5, "note": "Great"})
+
+# --- Valhalla routing (faked engine)
+def enc6(points):
+    out, plat, plon = [], 0, 0
+    for lat, lon in points:
+        la, lo = round(lat * 1e6), round(lon * 1e6)
+        for v in (la - plat, lo - plon):
+            v = ~(v << 1) if v < 0 else v << 1
+            while v >= 0x20:
+                out.append(chr((0x20 | (v & 0x1F)) + 63)); v >>= 5
+            out.append(chr(v + 63))
+        plat, plon = la, lo
+    return "".join(out)
+
+
+RPTS = [(-36.7900, 174.7700), (-36.7910, 174.7712), (-36.7925, 174.7720), (-36.7940, 174.7735)]
+back = wb.decode_polyline6(enc6(RPTS))
+assert all(abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6 for a, b in zip(back, RPTS))
+
+VALHALLA_OK = {"trip": {"status": 0, "summary": {"length": 1.2, "time": 900}, "legs": [{
+    "shape": enc6(RPTS), "maneuvers": [
+        {"type": 1, "instruction": "Walk north on The Promenade.", "length": 0.3, "time": 200, "begin_shape_index": 0},
+        {"type": 15, "instruction": "Turn left onto Hurstmere Road.", "length": 0.5, "time": 400, "begin_shape_index": 2},
+        {"type": 4, "instruction": "You have arrived at your destination.", "length": 0, "time": 0, "begin_shape_index": 3}]}]}}
+vcalls = []
+vmode = {"resp": None, "exc": None}
+
+
+def fake_vpost(url, **kw):
+    vcalls.append((url, kw.get("json")))
+    if vmode["exc"]:
+        raise vmode["exc"]
+    return vmode["resp"]
+
+
+real_post = wb.requests.post
+wb.requests.post = fake_vpost
+vmode["resp"] = Resp(VALHALLA_OK)
+
+start = first_chain_start = wb.json.loads(wb.sqlite3.connect(os.environ["DB_PATH"]).execute(
+    "SELECT geom FROM walks WHERE osm_id=?", (nz_id,)).fetchone()[0])[0][0]
+r = c.post("/api/route", json={"mode": "to_start", "from": [-36.79, 174.77], "to": start})
+rj = r.get_json()
+assert r.status_code == 200, rj
+url, payload = vcalls[-1]
+assert url == "http://valhalla:8002/route" and payload["costing"] == "pedestrian" and len(payload["locations"]) == 2
+assert payload["locations"][0] == {"lat": -36.79, "lon": 174.77} and payload["directions_options"]["units"] == "kilometers"
+assert rj["distance_km"] == 1.2 and rj["minutes"] == 15 and len(rj["shape"]) == 4 and len(rj["steps"]) == 3
+assert rj["steps"][1]["text"] == "Turn left onto Hurstmere Road." and abs(rj["steps"][1]["at"][0] - RPTS[2][0]) < 1e-6
+
+r = c.post("/api/route", json={"mode": "along", "walk_id": nz_id})
+assert r.status_code == 200
+url, payload = vcalls[-1]
+assert url == "http://valhalla:8002/trace_route" and payload["shape_match"] == "map_snap" and 2 <= len(payload["shape"]) <= 400
+
+assert c.post("/api/route", json={"mode": "along", "walk_id": 999999}).status_code == 404
+assert c.post("/api/route", json={"mode": "nope"}).status_code == 400
+assert c.post("/api/route", json={"mode": "to_start", "from": [200, 0], "to": [0, 0]}).status_code == 400
+assert c.post("/api/route", json={"mode": "to_start", "from": "x", "to": [0, 0]}).status_code == 400
+
+vmode["resp"] = Resp({"error_code": 171, "error": "No suitable edges near location"}, 400)
+r = c.post("/api/route", json={"mode": "to_start", "from": [51.5, -0.1], "to": [51.51, -0.1]})
+assert r.status_code == 502 and "New Zealand only" in r.get_json()["error"]
+vmode["exc"] = wb.requests.ConnectionError("Connection refused")
+r = c.post("/api/route", json={"mode": "to_start", "from": [-36.79, 174.77], "to": [-36.8, 174.78]})
+assert r.status_code == 502 and "building the New Zealand map tiles" in r.get_json()["error"]
+vmode["exc"] = None
+wb.requests.post = real_post
+
+assert c.get("/api/route/status").get_json() == {"enabled": True, "ready": True}
+good_get = wb.requests.get
+wb.requests.get = down
+assert c.get("/api/route/status").get_json() == {"enabled": True, "ready": False}
+wb.requests.get = good_get
+assert b"const ROUTING = true" in c.get("/").data
+wb.VALHALLA_URL = ""
+assert c.post("/api/route", json={"mode": "to_start", "from": [0, 0], "to": [0, 1]}).status_code == 404
+assert c.get("/api/route/status").get_json() == {"enabled": False, "ready": False}
+assert b"const ROUTING = false" in c.get("/").data
+wb.VALHALLA_URL = "http://valhalla:8002"
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
