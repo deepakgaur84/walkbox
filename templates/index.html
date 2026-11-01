@@ -142,7 +142,7 @@ $('goBtn').onclick = goPlace;
 $('place').addEventListener('keydown', e => { if (e.key === 'Enter') goPlace(); });
 
 // ---- Find ----
-$('searchBtn').onclick = async () => {
+async function runSearch() {
   const b = map.getBounds();
   if ((b.getNorth() - b.getSouth()) > MAX_SPAN || (b.getEast() - b.getWest()) > MAX_SPAN) {
     status('Zoom in a bit: the map view is too large to search.', true); return;
@@ -162,7 +162,8 @@ $('searchBtn').onclick = async () => {
     render();
   } catch (e) { status(e.message, true); }
   $('searchBtn').disabled = false;
-};
+}
+$('searchBtn').onclick = runSearch;
 
 $('selAllBtn').onclick = () => { results.filter(r => !r.added).forEach(r => selected.add(r.osm_id)); render(); };
 $('addSelBtn').onclick = async () => {
@@ -264,13 +265,13 @@ function focus(id) {
 
 // ---- Start at the current location; fall back to Auckland CBD ----
 (function startLocation() {
-  const fallback = msg => status(msg + ' Showing Auckland CBD. Move the map, then press “Find walks in this map view”.');
+  const fallback = msg => { status(msg + ' Showing Auckland CBD.'); runSearch(); };
   if (!navigator.geolocation) { fallback('Location is not available in this browser.'); return; }
   status('Finding your location…');
   navigator.geolocation.getCurrentPosition(
     pos => {
-      map.setView([pos.coords.latitude, pos.coords.longitude], 13);
-      status('Showing your current location. Press “Find walks in this map view”.');
+      map.setView([pos.coords.latitude, pos.coords.longitude], 13, {animate: false});
+      runSearch();
     },
     () => fallback('Could not get your location.'),
     {enableHighAccuracy: false, timeout: 8000, maximumAge: 600000}
