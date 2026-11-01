@@ -15,6 +15,20 @@ Pick any combination when you search:
 - **Official routes**: named walking route relations in OpenStreetMap. ODbL.
 - **Named paths**: named footpaths in OpenStreetMap, grouped by name into one walk (paths shorter than `MIN_PATH_KM` are ignored). ODbL.
 
+## Navigating to and along a walk
+
+Every walk card has a **Navigate** button:
+
+- **Directions to the start** opens Google Maps (or Apple Maps) with the start of the walk as the destination. Free, no key needed.
+- **Walk the route (Google Maps)** passes the start, end and up to 8 points along the walk to Google Maps in walking mode. Google
+  finds its own paths between those points, so this is an approximation, not the exact track.
+- **Open in a map app** uses a `geo:` link for apps such as OsmAnd or Organic Maps (Android).
+- **Show my position on this route** shows a blue dot on the Walkbox map and tells you whether you are on the route, how far off it
+  you are, and how far you are from the start. It uses your browser's location, so it needs the https address and location permission,
+  and the page must stay open. It does not give turn-by-turn spoken directions.
+
+For turn-by-turn use on the trail, download the GPX and open it in an offline app (OsmAnd, Organic Maps or similar).
+
 ## Photos and your own notes
 
 In **My walk box** each walk has a **Photos & my notes** button.

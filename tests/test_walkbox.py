@@ -309,7 +309,8 @@ c.put("/api/walks/%d/note" % nz_id, json={"rating": 5, "note": "Great"})
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data
 assert b"Walkbox" in page and b"srcDoc" in page and b"srcNz" in page and b"importBtn" in page
-assert b"Photos & my notes" in page and b"google" not in page.lower()
+assert b"Photos & my notes" in page and b"Navigate" in page
+assert b"gphoto" not in page and b"googleapis" not in page and b"GOOGLE_PLACES" not in page  # paid Places API stays removed
 assert c.delete("/api/walks/111").get_json()["ok"]
 assert len(lib("")) == 3 + 2
 print("ALL TESTS PASSED")

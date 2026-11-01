@@ -43,6 +43,9 @@
   .gpanel .stars span.on { color:#e0a100; }
   .gpanel textarea { width:100%; min-height:60px; padding:6px; border:1px solid var(--line); border-radius:6px; font:inherit; resize:vertical; }
   .gpanel .att { font-size:11px; color:var(--mute); margin-top:4px; }
+  .navp { margin-top:6px; padding:8px; background:#f1f6f3; border:1px solid var(--line); border-radius:8px; font-size:13px; cursor:default; }
+  .navp a, .navp button { display:inline-block; margin:2px 6px 2px 0; }
+  .navp .live { margin-top:4px; font-weight:600; }
   .badge { font-size:11px; background:var(--brand2); color:var(--brand); padding:1px 7px; border-radius:10px; margin-left:6px; }
   .acts { display:flex; flex-direction:column; gap:4px; align-items:flex-end; }
   .acts a, .acts button { font-size:13px; }
@@ -114,7 +117,7 @@ const $ = id => document.getElementById(id);
 function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 
 function setMode(m) {
-  mode = m;
+  mode = m; if (typeof stopTracking === 'function') stopTracking();
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
   $('findTools').style.display = m === 'find' ? '' : 'none';
@@ -228,6 +231,87 @@ $('importFile').onchange = async () => {
   $('importFile').value = '';
 };
 
+// BEGIN NAV
+function fmtPt(p) { return p[0].toFixed(6) + ',' + p[1].toFixed(6); }
+function navLinks(r) {
+  const chain = r.line[0], s = chain[0], e = chain[chain.length - 1];
+  const mid = [], n = Math.min(8, Math.max(0, chain.length - 2));
+  for (let i = 1; i <= n; i++) mid.push(chain[Math.round(i * (chain.length - 1) / (n + 1))]);
+  const base = 'https://www.google.com/maps/dir/?api=1';
+  return {
+    toStart: base + '&destination=' + fmtPt(s),
+    walk: base + '&origin=' + fmtPt(s) + '&destination=' + fmtPt(e) +
+          (mid.length ? '&waypoints=' + encodeURIComponent(mid.map(fmtPt).join('|')) : '') + '&travelmode=walking',
+    apple: 'https://maps.apple.com/?daddr=' + fmtPt(s) + '&dirflg=w',
+    geo: 'geo:' + fmtPt(s) + '?q=' + fmtPt(s) + '(' + encodeURIComponent(r.name) + ')'
+  };
+}
+function havM(a, b) {
+  const R = 6371008.8, rad = x => x * Math.PI / 180;
+  const dLa = rad(b[0] - a[0]), dLo = rad(b[1] - a[1]);
+  const q = Math.sin(dLa / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(q));
+}
+function distToRoute(lat, lon, lines) {   // metres from a point to the nearest part of the route
+  const kx = Math.cos(lat * Math.PI / 180) * 111320, ky = 110540;
+  let best = Infinity;
+  for (const line of lines) {
+    for (let i = 0; i < line.length - 1; i++) {
+      const ax = (line[i][1] - lon) * kx, ay = (line[i][0] - lat) * ky;
+      const bx = (line[i + 1][1] - lon) * kx, by = (line[i + 1][0] - lat) * ky;
+      const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+      let t = len2 ? -(ax * dx + ay * dy) / len2 : 0; t = Math.max(0, Math.min(1, t));
+      best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+    }
+  }
+  return best;
+}
+// END NAV
+
+let watchId = null, meMarker = null, meCircle = null;
+function stopTracking() {
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (meMarker) { map.removeLayer(meMarker); meMarker = null; }
+  if (meCircle) { map.removeLayer(meCircle); meCircle = null; }
+}
+function startTracking(r, out, btn) {
+  if (!navigator.geolocation) { out.textContent = 'Location is not available in this browser.'; return; }
+  stopTracking(); focus(r.osm_id); btn.textContent = 'Stop tracking'; out.textContent = 'Finding your position…';
+  watchId = navigator.geolocation.watchPosition(pos => {
+    const la = pos.coords.latitude, lo = pos.coords.longitude, acc = pos.coords.accuracy;
+    if (!meMarker) {
+      meMarker = L.circleMarker([la, lo], {radius: 8, color: '#fff', weight: 3, fillColor: '#1a73e8', fillOpacity: 1}).addTo(map);
+      meCircle = L.circle([la, lo], {radius: acc, color: '#1a73e8', weight: 1, fillOpacity: .1}).addTo(map);
+    } else { meMarker.setLatLng([la, lo]); meCircle.setLatLng([la, lo]).setRadius(acc); }
+    const d = distToRoute(la, lo, r.line), toStart = havM([la, lo], r.line[0][0]);
+    const near = d < Math.max(50, acc);
+    out.style.color = near ? 'var(--brand)' : 'var(--warn)';
+    out.textContent = (near ? 'On the route' : 'Off the route') + ' (' + Math.round(d) + ' m from the line). ' +
+      (toStart > 100 ? (toStart / 1000).toFixed(1) + ' km from the start.' : 'At the start.') + ' GPS accuracy about ' + Math.round(acc) + ' m.';
+  }, err => { out.textContent = 'Could not get your position: ' + err.message; btn.textContent = 'Show my position on this route'; },
+  {enableHighAccuracy: true, maximumAge: 5000, timeout: 20000});
+}
+function makeNav(r) {
+  const wrap = document.createElement('span');
+  const btn = document.createElement('button'); btn.className = 'b alt'; btn.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px'; btn.textContent = 'Navigate';
+  const panel = document.createElement('div'); panel.className = 'navp'; panel.style.display = 'none'; panel.onclick = e => e.stopPropagation();
+  const L_ = navLinks(r);
+  const add = (href, text) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = text; panel.appendChild(a); };
+  add(L_.toStart, 'Directions to the start (Google Maps)');
+  add(L_.walk, 'Walk the route (Google Maps)');
+  add(L_.apple, 'Apple Maps to the start');
+  add(L_.geo, 'Open in a map app (OsmAnd, Organic Maps)');
+  const note = document.createElement('div'); note.className = 'att'; note.style.cssText = 'font-size:11px;color:var(--mute);margin:4px 0';
+  note.textContent = 'Google Maps follows its own paths between a few points on the walk, so it is approximate. For the exact track, download the GPX and open it in an offline app such as OsmAnd or Organic Maps.';
+  const live = document.createElement('div'); live.className = 'live';
+  const tb = document.createElement('button'); tb.className = 'b alt'; tb.style.cssText = 'padding:4px 10px;font-size:13px'; tb.textContent = 'Show my position on this route';
+  tb.onclick = () => { if (watchId !== null) { stopTracking(); tb.textContent = 'Show my position on this route'; live.textContent = ''; } else startTracking(r, live, tb); };
+  panel.append(note, tb, live);
+  btn.onclick = e => { e.stopPropagation(); panel.style.display = panel.style.display === 'none' ? '' : 'none'; };
+  wrap.append(btn, panel);
+  return wrap;
+}
+
 async function togglePanel(r, btn, panel) {
   if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
   panel.style.display = ''; panel.className = 'gpanel'; panel.onclick = e => e.stopPropagation();
@@ -313,6 +397,7 @@ function render() {
       body.append(gb, panel);
     }
     { const at = document.createElement('a'); at.href = 'https://www.alltrails.com/search?q=' + encodeURIComponent(r.name + (r.region ? ' ' + r.region : '')); at.target = '_blank'; at.rel = 'noopener'; at.textContent = 'Find on AllTrails ↗'; at.style.cssText = 'font-size:13px;margin-left:10px'; at.onclick = e => e.stopPropagation(); body.appendChild(at); }
+    if (r.line && r.line.length && r.line[0].length > 1) body.appendChild(makeNav(r));
     if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
     if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
     item.appendChild(body);
