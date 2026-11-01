@@ -1,9 +1,7 @@
 services:
   walkbox:
-    # Builds straight from this repo, so no code folder is needed on the NAS.
-    build:
-      context: https://github.com/deepakgaur84/walkbox.git#main
-    image: walkbox:latest
+    # Image is built automatically by GitHub Actions on every push to main.
+    image: ghcr.io/deepakgaur84/walkbox:latest
     container_name: walkbox
     volumes:
       # The only persistent folder: holds walkbox.db. Must exist before deploy.

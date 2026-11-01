@@ -10,20 +10,17 @@ Route data © OpenStreetMap contributors (ODbL). Downloaded GPX files carry this
 
 ## Deploy on the Synology (Dockhand)
 
-1. File Station: create the folder `docker/walkbox/data` (the database lives here; this is the only folder needed on the NAS).
-   Or download the deploy zip that already contains it.
-2. Dockhand: create a stack named `walkbox` and paste in `docker-compose.yml` from this repo, then deploy.
-   The image is built from this repo, so the first start takes a minute or two.
-3. Open `http://<NAS-IP>:8095`. Optionally add a proxy host in Nginx Proxy Manager pointing to `<NAS-IP>` port `8095`.
+GitHub Actions builds the image on every push to `main` and publishes it to `ghcr.io/deepakgaur84/walkbox`.
+The NAS only pulls that image, so no code folder and no `git` on the NAS are needed.
+
+1. One time, GitHub: after the first build finishes (repo > Actions tab shows a green tick), open your profile > Packages > `walkbox` >
+   Package settings > Change visibility > Public. This lets the NAS pull it without a login.
+2. File Station: create the folder `docker/walkbox/data` (the database lives here), or extract the deploy zip that already contains it.
+3. Dockhand: create a stack named `walkbox`, paste in `docker-compose.yml` from this repo, and deploy.
+4. Open `http://<NAS-IP>:8095`. Optionally add a proxy host in Nginx Proxy Manager pointing to `<NAS-IP>` port `8095`.
    There is no login, so keep it on your LAN or put NPM access control in front.
 
-To update after code changes: push to `main`, then in Dockhand rebuild/redeploy the stack (force a rebuild so it re-fetches the repo).
-
-If the build from a Git URL is not supported by your Docker, see "Alternative" below.
-
-### Alternative: prebuilt image
-
-Build locally and push to a registry, then replace the `build:` block in the compose file with `image: <your image>`.
+To update after code changes: push to `main`, wait for the green tick on the Actions tab, then redeploy the stack in Dockhand with "pull latest image".
 
 ## Settings (environment variables)
 
