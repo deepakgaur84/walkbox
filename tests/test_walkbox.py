@@ -41,6 +41,9 @@ OVERPASS = {"elements": [
     {"type": "way", "id": 3, "tags": {"name": "Takapuna Beach Walkway", "highway": "path"}, "geometry": seg(2)},
     {"type": "way", "id": 4, "tags": {"name": "Tiny Alley", "highway": "footway"},
      "geometry": way_geom((-36.8, 174.8), (-36.8005, 174.8))},
+    {"type": "way", "id": 8, "tags": {"name": "Rocky Headland Track", "highway": "path"}, "geometry": seg(10)},
+    {"type": "way", "id": 9, "tags": {"name": "Rocky Headland Track", "highway": "path"}, "geometry": seg(11)},
+    {"type": "way", "id": 10, "tags": {"name": "Rocky Headland Track", "highway": "path"}, "geometry": seg(12)},
     {"type": "way", "id": 5, "tags": {"name": "Footpath", "highway": "footway"}, "geometry": seg(5) + seg(6)},
 ]}
 
@@ -51,6 +54,24 @@ DOC = {"features": [{
                    "difficulty": "Easy", "completionTime": "1 hr 30 min one way", "region": "Northland",
                    "walkingAndTrampingWebPage": "https://www.doc.govt.nz/x"},
 }]}
+
+
+def feat(i, name, walk, geom, **props):
+    line = [[p["lon"], p["lat"]] for p in geom]
+    base = {"OBJECTID": i, "Name": name, "Walk": walk, "Locality": "Takapuna",
+            "DogAccess": "OnLeash", "MobilityAccess": "Yes", "WebLink": "https://example.org/walkway",
+            "Description": "Coastal boardwalk and sand.", "ManagedBy": "Auckland Council"}
+    base.update(props)
+    return {"id": i, "geometry": {"type": "LineString", "coordinates": line}, "properties": base}
+
+
+NZT = {"features": [
+    feat(1, "Takapuna Beach Walkway", 2, seg(0)),
+    feat(2, "Takapuna Beach Walkway", 3, seg(1)),
+    feat(3, "Takapuna Beach Walkway", 2, seg(2)),
+    feat(4, "Bit of Path", 1, way_geom((-36.8, 174.8), (-36.8008, 174.8))),   # too short
+    feat(5, "Test Kauri Track", 3, way_geom((-36.0, 174.0), (-36.05, 174.0))),  # duplicate of DOC name
+]}
 
 
 class Resp:
@@ -69,6 +90,8 @@ def fake_get(url, **kw):
     if "open-meteo" in url or "elevation" in url:
         n = len(kw["params"]["latitude"].split(","))
         return Resp({"elevation": [100 + (i % 10) * 3 for i in range(n)]})
+    if "b5ADKIcWivL5vNaV" in url:
+        return Resp(NZT)
     return Resp(DOC)
 
 
@@ -94,11 +117,19 @@ assert "Takapuna Beach Walkway" in by_name, list(by_name)
 assert "Tiny Alley" not in by_name and "Footpath" not in by_name  # too short / generic
 assert not any(x["name"] == "Empty" for x in res)
 walkway = by_name["Takapuna Beach Walkway"]
-assert walkway["source"] == "osm-path" and walkway["distance_km"] > 1.0 and len(walkway["line"]) == 1, walkway
+assert walkway["source"] == "nz-track" and walkway["distance_km"] > 1.0 and len(walkway["line"]) == 1, walkway
+assert walkway["difficulty"] == "Walking track" and walkway["region"] == "Takapuna", walkway  # hardest grade wins
+assert "Dogs: on lead only." in walkway["description"] and walkway["link"] == "https://example.org/walkway"
+assert sum(1 for x in res if x["name"] == "Takapuna Beach Walkway") == 1  # OSM duplicate dropped
+assert "Bit of Path" not in by_name  # too short
+assert sum(1 for x in res if x["name"] == "Test Kauri Track") == 1 and by_name["Test Kauri Track"]["source"] == "doc"
+assert by_name["Rocky Headland Track"]["source"] == "osm-path"
 assert by_name["Test Kauri Track"]["source"] == "doc" and by_name["Test Kauri Track"]["difficulty"] == "Easy"
 assert by_name["Test Kauri Track"]["time_text"].startswith("1 hr")
 assert by_name["Test Loop & Ridge"]["difficulty"] == "Moderate"  # from sac_scale
 assert res[0]["source"] == "doc"  # DOC listed first
+srcs = [x["source"] for x in res]
+assert srcs.index("nz-track") < srcs.index("osm-route") < srcs.index("osm-path")
 
 # single query to Overpass combines relations and paths
 oq = [x for x in calls if x.startswith("overpass:")][-1]
@@ -160,7 +191,7 @@ assert c.get("/walks/999.gpx").status_code == 404
 # --- zip with per-source attribution
 z = zipfile.ZipFile(io.BytesIO(c.get("/walks.zip").data))
 names = z.namelist()
-assert len(names) == 5 and "ATTRIBUTION.txt" in names, names
+assert len(names) == 5 and "ATTRIBUTION.txt" in names, names  # zip taken before import
 att = z.read("ATTRIBUTION.txt").decode()
 assert "OpenStreetMap" in att and "Department of Conservation" in att
 for n in names:
@@ -180,10 +211,50 @@ lst = c.get("/api/library").get_json()["results"]
 assert lst[0]["name"] == "Old walk" and lst[0]["source"] == "osm-route"
 assert c.get("/walks/5.gpx").status_code == 200
 
+# --- back to the main test database
+wb.DB_PATH = os.environ["DB_PATH"]
+
+# --- NZ track GPX attribution
+nz_id = walkway["osm_id"]
+g = c.get("/walks/%d.gpx" % nz_id).data.decode()
+assert "Outdoor Access Commission" in g and "example.org/walkway" in g
+ET.fromstring(g.encode())
+
+# --- GPX import
+GPX = b"""<?xml version="1.0"?><gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<metadata><name>My Coast Walk</name><desc>Done on a sunny day</desc></metadata>
+<trk><trkseg>""" + b"".join(
+    b'<trkpt lat="%.5f" lon="174.77000"><ele>%d</ele></trkpt>' % (-36.80 - i * 0.002, 10 + (i % 2) * 5)
+    for i in range(12)) + b"""</trkseg></trk></gpx>"""
+RTE = b"""<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><rte><name>Planned</name>
+<rtept lat="-36.8" lon="174.7"/><rtept lat="-36.81" lon="174.7"/></rte></gpx>"""
+EVIL = b"""<?xml version="1.0"?><!DOCTYPE gpx [<!ENTITY a "aaaa">]><gpx version="1.1"/>"""
+
+
+def upload(*pairs):
+    return c.post("/api/import", data={"files": [(io.BytesIO(d), n) for n, d in pairs]},
+                  content_type="multipart/form-data")
+
+
+r = upload(("walk.gpx", GPX), ("planned.gpx", RTE), ("evil.gpx", EVIL), ("junk.gpx", b"hello"))
+j = r.get_json()
+assert r.status_code == 200 and j["added"] == 2 and len(j["errors"]) == 2, j
+assert any("DOCTYPE" in e for e in j["errors"]) and any("not a valid GPX" in e for e in j["errors"])
+imp = [x for x in lib("") if x["source"] == "import"]
+mine = next(x for x in imp if x["name"] == "My Coast Walk")
+assert mine["distance_km"] > 0.4 and mine["ascent_m"] == 30.0 and mine["description"] == "Done on a sunny day", mine
+assert any(x["name"] == "Planned" for x in imp)  # route fallback
+assert upload(("walk.gpx", GPX)).get_json()["skipped"] == 1  # duplicate
+assert c.post("/api/import", data={}, content_type="multipart/form-data").status_code == 400
+ig = c.get("/walks/%d.gpx" % mine["osm_id"]).data.decode()
+assert "Imported by the user" in ig and "My Coast Walk" in ig
+ET.fromstring(ig.encode())
+assert [x["name"] for x in lib("q=sunny")] == ["My Coast Walk"]
+
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data
-assert b"Walkbox" in page and b"srcDoc" in page
+assert b"Walkbox" in page and b"srcDoc" in page and b"srcNz" in page and b"importBtn" in page
 assert c.delete("/api/walks/111").get_json()["ok"]
-assert len(lib("")) == 3
+assert len(lib("")) == 3 + 2
 print("ALL TESTS PASSED")

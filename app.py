@@ -5,6 +5,8 @@ Sources:
   * OpenStreetMap official route relations   (c) OpenStreetMap contributors, ODbL
   * OpenStreetMap named footpaths, grouped   (c) OpenStreetMap contributors, ODbL
   * NZ Department of Conservation tracks     Source: DOC, CC BY 4.0
+  * NZ national tracks (councils, LINZ, DOC)  Herenga a Nuku Outdoor Access Commission
+  * GPX files you import yourself
 """
 import io
 import json
@@ -16,6 +18,7 @@ import threading
 import time
 import zlib
 import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
 
@@ -35,32 +38,52 @@ DOC_URL = os.environ.get(
     "https://services1.arcgis.com/3JjYDyG3oajxU6HO/ArcGIS/rest/services/"
     "DOC_Walking_Experiences/FeatureServer/1/query",
 )
+NZT_URL = os.environ.get(
+    "NZT_URL",
+    "https://services2.arcgis.com/b5ADKIcWivL5vNaV/ArcGIS/rest/services/"
+    "National_Tracks_Dataset_Pilot/FeatureServer/0/query",
+)
 ELEVATION_URL = os.environ.get("ELEVATION_URL", "https://api.open-meteo.com/v1/elevation")
 DB_PATH = os.environ.get("DB_PATH", "/data/walkbox.db")
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "150"))
 MAX_PATH_WAYS = int(os.environ.get("MAX_PATH_WAYS", "2500"))
 MIN_PATH_KM = float(os.environ.get("MIN_PATH_KM", "0.8"))
+MIN_TRACK_KM = float(os.environ.get("MIN_TRACK_KM", "0.3"))
+MAX_IMPORT_BYTES = int(os.environ.get("MAX_IMPORT_MB", "15")) * 1024 * 1024
 ROUTE_TYPES = os.environ.get("ROUTE_TYPES", "hiking|foot|walking")
 PATH_HIGHWAYS = os.environ.get("PATH_HIGHWAYS", "footway|path|track|pedestrian")
 USER_AGENT = os.environ.get("USER_AGENT", "walkbox/1.1 (self-hosted walk library)")
 
-ALL_SOURCES = ("routes", "paths", "doc")
+ALL_SOURCES = ("routes", "paths", "doc", "nz")
 NZ_BOX = (-48.0, -34.0, 166.0, 179.5)  # south, north, west, east
 PATH_BASE = 10 ** 12  # synthetic ids for grouped OSM paths
 DOC_BASE = 2 * 10 ** 12  # synthetic ids for DOC tracks
+NZT_BASE = 3 * 10 ** 12  # synthetic ids for NZ national tracks
+IMPORT_BASE = 4 * 10 ** 12  # synthetic ids for imported GPX files
 GENERIC_NAMES = {"footpath", "path", "track", "walkway", "footway", "pavement", "steps",
                  "pedestrian", "boardwalk", "trail", "walking track", "unnamed"}
+
+WALK_GRADE = {1: "Path", 2: "Short walk", 3: "Walking track", 4: "Tramping track",
+              5: "Challenging tramping track", 6: "Route"}
+DOG_TEXT = {"OffLeash": "off lead", "OnLeash": "on lead only", "Permit": "permit required",
+            "ProhibitedAtTimes": "prohibited at times", "Prohibited": "not allowed"}
 
 ATTRIBUTION = {
     "osm-route": "(c) OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)",
     "osm-path": "(c) OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)",
+    "nz-track": "Source: Herenga a Nuku Outdoor Access Commission national tracks dataset, compiled "
+                "from councils, LINZ and DOC. Licence not stated by the service; check the managing "
+                "organisation before reuse.",
+    "import": "Imported by the user from a GPX file. Check the original source's terms before sharing.",
     "doc": "Source: New Zealand Department of Conservation, CC BY 4.0 "
            "(https://creativecommons.org/licenses/by/4.0/)",
 }
-SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC"}
+SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC",
+                "nz-track": "NZ tracks", "import": "Imported"}
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 _overpass_lock = threading.Lock()
 _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
@@ -312,6 +335,67 @@ def parse_doc(data):
     return walks
 
 
+def _lines_of(geom):
+    coords = (geom or {}).get("coordinates") or []
+    if (geom or {}).get("type") == "LineString":
+        lines = [coords]
+    elif (geom or {}).get("type") == "MultiLineString":
+        lines = coords
+    else:
+        return []
+    return [[(c[1], c[0]) for c in line] for line in lines if len(line) >= 2]
+
+
+def parse_nz_tracks(data):
+    """Group the national track segments by name into one walk per track."""
+    groups = {}
+    for f in data.get("features", []):
+        segs = _lines_of(f.get("geometry"))
+        if not segs:
+            continue
+        p = {str(k).lower(): v for k, v in (f.get("properties") or {}).items()}
+        name = str(p.get("name") or p.get("maintrail") or "").strip()
+        if not name or name.lower() in GENERIC_NAMES:
+            continue
+        grp = groups.setdefault(name.lower(), {"name": name, "segs": [], "props": []})
+        grp["segs"] += segs
+        grp["props"].append(p)
+    walks = []
+    for grp in groups.values():
+        chains = chain_segments(grp["segs"])
+        dist = sum(chain_length_m(c) for c in chains) / 1000.0
+        if dist < MIN_TRACK_KM:
+            continue
+        props = grp["props"]
+
+        def first(key):
+            for pr in props:
+                v = pr.get(key)
+                if v not in (None, "", "Unknown"):
+                    return v
+            return None
+
+        grades = [pr.get("walk") for pr in props if pr.get("walk") in WALK_GRADE]
+        difficulty = WALK_GRADE[max(grades)] if grades else None
+        facts = []
+        dog = first("dogaccess")
+        if dog in DOG_TEXT:
+            facts.append("Dogs: %s." % DOG_TEXT[dog])
+        if first("mobilityaccess") == "Yes":
+            facts.append("Suitable for mobility access.")
+        desc = " ".join(x for x in [first("description"), " ".join(facts)] if x) or None
+        lat0, lon0 = chains[0][0]
+        wid = NZT_BASE + zlib.crc32(("%s|%.2f|%.2f" % (grp["name"], lat0, lon0)).encode("utf-8"))
+        wk = make_walk(
+            wid, "nz-track", grp["name"], chains, {"operator": first("managedby")},
+            description=desc, difficulty=difficulty, link=first("weblink"),
+            region=first("locality") or first("localauthority"),
+        )
+        if wk:
+            walks.append(wk)
+    return walks
+
+
 # --------------------------------------------------------------------------
 # Remote sources
 # --------------------------------------------------------------------------
@@ -387,6 +471,23 @@ def search_doc(s, w, n, e):
     return parse_doc(data)
 
 
+def search_nz(s, w, n, e):
+    params = {
+        "where": "Walk IN (1,2,3,4,5,6,98) AND (Status IS NULL OR Status NOT IN ('Decommisioned','Proposed'))",
+        "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
+        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "outSR": 4326,
+        "resultRecordCount": 2000, "f": "geojson",
+    }
+    try:
+        r = requests.get(NZT_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=45)
+        data = r.json()
+    except (requests.RequestException, ValueError) as ex:
+        raise RuntimeError(_short_error(NZT_URL, ex))
+    if r.status_code != 200 or "error" in data:
+        raise RuntimeError("service error: %s" % (data.get("error", {}).get("message") or r.status_code))
+    return parse_nz_tracks(data)
+
+
 def overlaps_nz(s, w, n, e):
     return not (n < NZ_BOX[0] or s > NZ_BOX[1] or e < NZ_BOX[2] or w > NZ_BOX[3])
 
@@ -403,6 +504,16 @@ def search_all(s, w, n, e, sources):
             walks += search_doc(s, w, n, e)
         except RuntimeError as ex:
             problems.append("DOC: %s" % ex)
+    if "nz" in sources and overlaps_nz(s, w, n, e):
+        try:
+            walks += search_nz(s, w, n, e)
+        except RuntimeError as ex:
+            problems.append("NZ tracks: %s" % ex)
+    # Prefer curated sources: drop duplicates of the same name from less curated ones.
+    doc_names = {x["name"].lower() for x in walks if x["source"] == "doc"}
+    walks = [x for x in walks if not (x["source"] == "nz-track" and x["name"].lower() in doc_names)]
+    curated = {x["name"].lower() for x in walks if x["source"] in ("doc", "nz-track")}
+    walks = [x for x in walks if not (x["source"] == "osm-path" and x["name"].lower() in curated)]
     with _cache_lock:
         for wk in walks:
             _cache[wk["osm_id"]] = wk
@@ -445,13 +556,21 @@ def build_gpx(row):
     if source == "doc" and row["link"]:
         link = row["link"]
         link_text = "DOC page"
+    elif source == "nz-track" and row["link"]:
+        link, link_text = row["link"], "Track information"
+    elif source == "import":
+        link, link_text = "https://www.openstreetmap.org/#map=15/%.5f/%.5f" % (row["lat"], row["lon"]), "Location"
     elif source == "osm-path":
         link, link_text = "https://www.openstreetmap.org/#map=16/%.5f/%.5f" % (row["lat"], row["lon"]), "OpenStreetMap"
     else:
         link, link_text = "https://www.openstreetmap.org/relation/%d" % row["osm_id"], "OpenStreetMap relation"
-    author = "New Zealand Department of Conservation" if source == "doc" else "OpenStreetMap contributors"
-    license_url = ("https://creativecommons.org/licenses/by/4.0/" if source == "doc"
-                   else "https://opendatacommons.org/licenses/odbl/")
+    author = {"doc": "New Zealand Department of Conservation",
+              "nz-track": "Herenga a Nuku Outdoor Access Commission",
+              "import": "Original GPX author"}.get(source, "OpenStreetMap contributors")
+    license_url = {"doc": "https://creativecommons.org/licenses/by/4.0/",
+                   "nz-track": "https://www.herengaanuku.govt.nz/",
+                   "import": "https://www.openstreetmap.org/copyright"}.get(
+        source, "https://opendatacommons.org/licenses/odbl/")
     out = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="walkbox" xmlns="http://www.topografix.com/GPX/1/1">',
@@ -534,7 +653,8 @@ def api_search():
     if not walks and problems:
         return jsonify(error="Could not search: " + " | ".join(problems)), 502
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
-    walks.sort(key=lambda x: (x["source"] != "doc", -x["distance_km"]))
+    order = {"doc": 0, "nz-track": 1, "osm-route": 2, "osm-path": 3}
+    walks.sort(key=lambda x: (order.get(x["source"], 9), -x["distance_km"]))
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks],
                    warnings=problems, capped=len(walks) >= MAX_RESULTS)
 
@@ -646,9 +766,129 @@ def download_zip():
         for r in rows:
             z.writestr(safe_filename(r["name"], r["osm_id"]), build_gpx(r))
             used.add(r["source"] or "osm-route")
-        z.writestr("ATTRIBUTION.txt", "\n".join("Route data: " + ATTRIBUTION[u] for u in sorted(used)) + "\n")
+        z.writestr("ATTRIBUTION.txt", "\n".join("Route data: " + ATTRIBUTION.get(u, ATTRIBUTION["osm-route"]) for u in sorted(used)) + "\n")
     return Response(buf.getvalue(), mimetype="application/zip",
                     headers={"Content-Disposition": 'attachment; filename="walkbox-walks.zip"'})
+
+
+# --------------------------------------------------------------------------
+# GPX import
+# --------------------------------------------------------------------------
+def _local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def parse_gpx_bytes(data, filename):
+    """Parse a GPX file you downloaded yourself into a walk dict."""
+    upper = data.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise ValueError("unsafe XML (DOCTYPE/ENTITY) is not accepted")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as ex:
+        raise ValueError("not a valid GPX file (%s)" % ex)
+    if _local(root.tag) != "gpx":
+        raise ValueError("not a GPX file")
+    name = desc = None
+    chains, eles = [], []
+
+    def text_of(el, child):
+        for c in el:
+            if _local(c.tag) == child and c.text and c.text.strip():
+                return c.text.strip()
+        return None
+
+    for el in root:
+        tag = _local(el.tag)
+        if tag == "metadata":
+            name = name or text_of(el, "name")
+            desc = desc or text_of(el, "desc")
+        elif tag == "trk":
+            name = name or text_of(el, "name")
+            desc = desc or text_of(el, "desc")
+            for seg in el:
+                if _local(seg.tag) != "trkseg":
+                    continue
+                pts, ele = [], []
+                for pt in seg:
+                    if _local(pt.tag) != "trkpt":
+                        continue
+                    try:
+                        pts.append((float(pt.get("lat")), float(pt.get("lon"))))
+                    except (TypeError, ValueError):
+                        continue
+                    ev = text_of(pt, "ele")
+                    try:
+                        ele.append(float(ev) if ev is not None else None)
+                    except ValueError:
+                        ele.append(None)
+                if len(pts) >= 2:
+                    chains.append(pts)
+                    eles.append(ele)
+    if not chains:  # fall back to planned routes
+        for el in root:
+            if _local(el.tag) == "rte":
+                name = name or text_of(el, "name")
+                pts = []
+                for pt in el:
+                    if _local(pt.tag) == "rtept":
+                        try:
+                            pts.append((float(pt.get("lat")), float(pt.get("lon"))))
+                        except (TypeError, ValueError):
+                            pass
+                if len(pts) >= 2:
+                    chains.append(pts)
+                    eles.append([None] * len(pts))
+    if not chains:
+        raise ValueError("no track or route points found")
+    order = sorted(range(len(chains)), key=lambda i: chain_length_m(chains[i]), reverse=True)
+    chains = [chains[i] for i in order]
+    eles = [eles[i] for i in order]
+    name = name or re.sub(r"\.gpx$", "", filename or "Imported walk", flags=re.I) or "Imported walk"
+    first = chains[0][0]
+    wid = IMPORT_BASE + zlib.crc32(("%s|%.5f|%.5f|%d" % (name, first[0], first[1], len(chains[0]))).encode("utf-8"))
+    wk = make_walk(wid, "import", name[:200], chains, {}, description=desc)
+    top = eles[0]
+    if top and sum(1 for e in top if e is not None) >= 0.8 * len(top):
+        vals = [e for e in top if e is not None]
+        wk["ascent_m"] = round(sum(b - a for a, b in zip(vals, vals[1:]) if b - a > 1.0), 0)
+    return wk
+
+
+@app.post("/api/import")
+def api_import():
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify(error="Choose one or more .gpx files"), 400
+    conn = db()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    added, skipped, errors = 0, 0, []
+    for f in files[:50]:
+        data = f.read(MAX_IMPORT_BYTES + 1)
+        if len(data) > MAX_IMPORT_BYTES:
+            errors.append("%s: file is too large" % f.filename)
+            continue
+        try:
+            wk = parse_gpx_bytes(data, f.filename)
+        except ValueError as ex:
+            errors.append("%s: %s" % (f.filename, ex))
+            continue
+        if wk["ascent_m"] is None:
+            wk["ascent_m"] = elevation_gain(wk["chains"][0])
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO walks (osm_id,name,ref,network,operator,description,distance_km,"
+            "lat,lon,place,tags,geom,added_at,source,difficulty,route_type,ascent_m,link,region,time_text)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wk["osm_id"], wk["name"], None, None, None, wk["description"], wk["distance_km"],
+             wk["lat"], wk["lon"], None, "{}", json.dumps(wk["chains"]), now, "import", None,
+             wk["route_type"], wk["ascent_m"], None, None, None),
+        )
+        if cur.rowcount:
+            added += 1
+        else:
+            skipped += 1
+    conn.commit()
+    return jsonify(added=added, skipped=skipped, errors=errors)
 
 
 @app.delete("/api/walks/<int:osm_id>")

@@ -58,6 +58,7 @@
       <button class="b alt" id="goBtn">Go</button>
       <button class="b" id="searchBtn" style="width:100%">Find walks in this map view</button>
       <label class="src"><input type="checkbox" id="srcDoc" checked> DOC tracks (NZ)</label>
+      <label class="src"><input type="checkbox" id="srcNz" checked> NZ council tracks</label>
       <label class="src"><input type="checkbox" id="srcRoutes" checked> Official routes</label>
       <label class="src"><input type="checkbox" id="srcPaths" checked> Named paths</label>
     </div>
@@ -72,6 +73,8 @@
         <option value="shortest">Shortest</option>
       </select>
       <button class="b alt" id="zipBtn">Download all (.zip)</button>
+      <button class="b alt" id="importBtn">Import GPX</button>
+      <input type="file" id="importFile" accept=".gpx,application/gpx+xml" multiple style="display:none">
     </div>
     <div id="findActions" class="tools" style="display:none">
       <button class="b" id="addSelBtn">Add selected to my box</button>
@@ -148,6 +151,7 @@ $('searchBtn').onclick = async () => {
   try {
     const sources = [];
     if ($('srcDoc').checked) sources.push('doc');
+    if ($('srcNz').checked) sources.push('nz');
     if ($('srcRoutes').checked) sources.push('routes');
     if ($('srcPaths').checked) sources.push('paths');
     const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources});
@@ -188,6 +192,22 @@ async function loadBox() {
 let t; ['q','minKm','maxKm','sort'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(t); t = setTimeout(loadBox, 250); }));
 $('zipBtn').onclick = () => { location.href = '/walks.zip?ids=' + results.map(r => r.osm_id).join(','); };
 
+$('importBtn').onclick = () => $('importFile').click();
+$('importFile').onchange = async () => {
+  const files = [...$('importFile').files]; if (!files.length) return;
+  const fd = new FormData(); files.forEach(f => fd.append('files', f));
+  status('Importing ' + files.length + ' file(s)…');
+  try {
+    const r = await fetch('/api/import', {method:'POST', body: fd});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('Import failed (' + r.status + ')'));
+    await loadBox();
+    const bad = j.errors && j.errors.length ? ' Problems: ' + j.errors.join(' | ') : '';
+    status(j.added + ' walk(s) imported' + (j.skipped ? ', ' + j.skipped + ' already in your box' : '') + '.' + bad, !!bad && !j.added);
+  } catch (e) { status(e.message, true); }
+  $('importFile').value = '';
+};
+
 async function del(id) {
   if (!confirm('Remove this walk from your box?')) return;
   await fetch('/api/walks/' + id, {method:'DELETE'}); loadBox();
@@ -217,7 +237,7 @@ function render() {
     chip(r.source_label);
     if (r.ref) chip('ref ' + r.ref);
     body.appendChild(chips);
-    if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info (DOC page)'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
+    if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
     if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
     item.appendChild(body);
     if (r.added) {
