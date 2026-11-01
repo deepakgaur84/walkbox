@@ -126,8 +126,8 @@ function setMode(m) {
 $('tabFind').onclick = () => setMode('find');
 $('tabBox').onclick = () => setMode('box');
 
-async function post(url, body) {
-  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+async function post(url, body, signal) {
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body), signal});
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || ('Request failed (' + r.status + ')'));
   return j;
@@ -142,35 +142,45 @@ async function goPlace() {
     const j = await r.json();
     if (!j.length) { status('Place not found.', true); return; }
     const bb = j[0].boundingbox.map(Number); // s, n, w, e
-    map.fitBounds([[bb[0], bb[2]], [bb[1], bb[3]]], {maxZoom: 13});
-    status('Moved to ' + j[0].display_name + '. Now press “Find walks in this map view”.');
+    map.fitBounds([[bb[0], bb[2]], [bb[1], bb[3]]], {maxZoom: 13, animate: false});
     window._place = j[0].display_name.split(',').slice(0, 2).join(',').trim();
+    status('Moved to ' + j[0].display_name + '. Searching…');
+    runSearch();
   } catch (e) { status('Place lookup failed: ' + e.message, true); }
 }
 $('goBtn').onclick = goPlace;
 $('place').addEventListener('keydown', e => { if (e.key === 'Enter') goPlace(); });
 
 // ---- Find ----
+let searchCtl = null, searchSeq = 0;
 async function runSearch() {
   const b = map.getBounds();
   if ((b.getNorth() - b.getSouth()) > MAX_SPAN || (b.getEast() - b.getWest()) > MAX_SPAN) {
     status('Zoom in a bit: the map view is too large to search.', true); return;
   }
-  $('searchBtn').disabled = true; status('Searching OpenStreetMap…');
+  if (searchCtl) searchCtl.abort();          // a new search replaces the one in progress
+  searchCtl = new AbortController();
+  const mine = ++searchSeq, btn = $('searchBtn');
+  btn.textContent = 'Searching… (press again to restart)'; status('Searching all sources. This can take up to a minute…');
   try {
     const sources = [];
     if ($('srcDoc').checked) sources.push('doc');
     if ($('srcNz').checked) sources.push('nz');
     if ($('srcRoutes').checked) sources.push('routes');
     if ($('srcPaths').checked) sources.push('paths');
-    const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources});
+    const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources}, searchCtl.signal);
+    if (mine !== searchSeq) return;           // stale reply
     results = j.results; selected.clear();
     const warn = j.warnings && j.warnings.length ? ' Note: ' + j.warnings.join(' | ') : '';
     status((results.length ? results.length + ' walks found' + (j.capped ? ' (list capped, zoom in for more)' : '') + '.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
     $('findActions').style.display = results.length ? '' : 'none';
     render();
-  } catch (e) { status(e.message, true); }
-  $('searchBtn').disabled = false;
+  } catch (e) {
+    if (e.name === 'AbortError' || mine !== searchSeq) return;
+    status(e.message, true);
+  } finally {
+    if (mine === searchSeq) btn.textContent = 'Find walks in this map view';
+  }
 }
 $('searchBtn').onclick = runSearch;
 

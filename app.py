@@ -423,7 +423,7 @@ def overpass(query):
         for url in OVERPASS_URLS:
             try:
                 r = requests.post(url, data={"data": query},
-                                  headers={"User-Agent": USER_AGENT}, timeout=90)
+                                  headers={"User-Agent": USER_AGENT}, timeout=45)
                 if r.status_code == 200:
                     return r.json()
                 errors.append("%s: HTTP %s" % (url.split("/")[2], r.status_code))
@@ -435,7 +435,7 @@ def overpass(query):
 
 def search_osm(s, w, n, e, want_routes, want_paths):
     bbox = "(%f,%f,%f,%f)" % (s, w, n, e)
-    parts = ["[out:json][timeout:60];"]
+    parts = ["[out:json][timeout:40];"]
     if want_routes:
         parts.append('rel["type"="route"]["route"~"^(%s)$"]%s->.r;' % (ROUTE_TYPES, bbox))
     if want_paths:
@@ -468,7 +468,7 @@ def search_doc(s, w, n, e):
         "resultRecordCount": MAX_RESULTS, "f": "geojson",
     }
     try:
-        r = requests.get(DOC_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=45)
+        r = requests.get(DOC_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=25)
         data = r.json()
     except (requests.RequestException, ValueError) as ex:
         raise RuntimeError(_short_error(DOC_URL, ex))
@@ -485,7 +485,7 @@ def search_nz(s, w, n, e):
         "resultRecordCount": 2000, "f": "geojson",
     }
     try:
-        r = requests.get(NZT_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=45)
+        r = requests.get(NZT_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=25)
         data = r.json()
     except (requests.RequestException, ValueError) as ex:
         raise RuntimeError(_short_error(NZT_URL, ex))
