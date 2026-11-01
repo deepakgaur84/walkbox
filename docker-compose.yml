@@ -6,10 +6,15 @@ services:
     volumes:
       # The only persistent folder: holds walkbox.db. Must exist before deploy.
       - /volume1/docker/walkbox/data:/data
-    ports:
-      - "8095:8080"
     environment:
       DB_PATH: /data/walkbox.db
       MAX_SPAN_DEG: "0.5"
       MAX_RESULTS: "150"
+    networks:
+      - proxynet
     restart: unless-stopped
+
+networks:
+  proxynet:
+    external: true
+    name: proxynet

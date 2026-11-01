@@ -17,8 +17,9 @@ The NAS only pulls that image, so no code folder and no `git` on the NAS are nee
    Package settings > Change visibility > Public. This lets the NAS pull it without a login.
 2. File Station: create the folder `docker/walkbox/data` (the database lives here), or extract the deploy zip that already contains it.
 3. Dockhand: create a stack named `walkbox`, paste in `docker-compose.yml` from this repo, and deploy.
-4. Open `http://<NAS-IP>:8095`. Optionally add a proxy host in Nginx Proxy Manager pointing to `<NAS-IP>` port `8095`.
-   There is no login, so keep it on your LAN or put NPM access control in front.
+4. In Zoraxy, add a proxy rule for your hostname with target `walkbox:8080` (container name and internal port; TLS off).
+   Walkbox joins the existing `proxynet` Docker network and publishes no host port.
+   There is no login, so enable authentication/access control on the proxy rule.
 
 To update after code changes: push to `main`, wait for the green tick on the Actions tab, then redeploy the stack in Dockhand with "pull latest image".
 
