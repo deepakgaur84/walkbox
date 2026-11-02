@@ -40,6 +40,34 @@
   @media (max-width:800px) { #info { width:calc(100% - 24px); max-height:38%; } }
   #revbtn { position:absolute; top:10px; right:12px; z-index:900; display:none; background:#fff; border:0; border-radius:20px; padding:7px 14px; font-size:13px; font-weight:600; color:var(--brand); box-shadow:0 1px 6px rgba(0,0,0,.3); cursor:pointer; }
   #revbtn.on { background:var(--brand); color:#fff; }
+  #editbtn { position:absolute; top:48px; right:12px; z-index:900; display:none; background:#fff; border:0; border-radius:20px; padding:7px 14px; font-size:13px; font-weight:600; color:var(--brand); box-shadow:0 1px 6px rgba(0,0,0,.3); cursor:pointer; }
+  #editor { position:absolute; left:54px; top:10px; bottom:156px; width:296px; overflow:auto; z-index:950; background:#fff; border-radius:14px; box-shadow:0 2px 12px rgba(0,0,0,.35); font-size:13px; padding:10px 12px; display:none; }
+  #editor h3 { margin:0 0 6px; font-size:15px; }
+  #editor .tools3 { display:flex; gap:4px; margin:6px 0; }
+  #editor .tools3 button { flex:1; border:1px solid var(--line); background:#fff; border-radius:8px; padding:5px 2px; cursor:pointer; font-size:13px; }
+  #editor .tools3 button.on { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:600; }
+  #editor .hint { color:var(--mute); font-size:12px; margin:2px 0 6px; }
+  #editor .row { display:flex; gap:4px; flex-wrap:wrap; margin:6px 0; }
+  #editor .row button { border:1px solid var(--line); background:#fff; border-radius:8px; padding:4px 9px; cursor:pointer; font-size:12px; }
+  #editor .row button:disabled { opacity:.4; cursor:default; }
+  #editor .stats { background:var(--brand2); border-radius:8px; padding:6px 8px; margin:6px 0; font-weight:600; }
+  #editor .notice { color:var(--warn); font-size:12px; margin:2px 0; }
+  #editor label { display:block; margin:6px 0 2px; color:var(--mute); font-size:12px; }
+  #editor input[type=text], #editor textarea, #editor select { width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  #editor textarea { min-height:48px; resize:vertical; }
+  #editor .stars span { font-size:20px; cursor:pointer; color:#c9d3cc; } #editor .stars span.on { color:#e0a100; }
+  #editor .foot2 { display:flex; gap:6px; margin-top:10px; position:sticky; bottom:-10px; background:#fff; padding:6px 0; }
+  #editor .foot2 button { flex:1; padding:8px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; font-size:13px; }
+  #editor .foot2 button.go { background:var(--brand); color:#fff; border-color:var(--brand); font-weight:600; }
+  .wp { width:18px; height:18px; border-radius:50%; background:#fff; border:3px solid #1b5e20; box-sizing:border-box; cursor:grab; }
+  .wp.cut { border-color:#e8590c; background:#ffe8d9; border-radius:4px; }
+  #savedlg { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:3000; display:flex; align-items:center; justify-content:center; }
+  #savedlg .box { background:#fff; border-radius:14px; padding:16px 18px; width:min(420px, 92vw); box-shadow:0 6px 30px rgba(0,0,0,.4); font-size:14px; }
+  #savedlg h3 { margin:0 0 8px; } #savedlg label.opt { display:block; padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin:6px 0; cursor:pointer; }
+  #savedlg label.opt.dis { opacity:.5; cursor:default; } #savedlg input[type=text] { width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:6px; margin:4px 0 8px; font:inherit; }
+  #savedlg .btns { display:flex; gap:8px; justify-content:flex-end; margin-top:10px; } #savedlg .btns button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  #savedlg .btns .go { background:var(--brand); color:#fff; border-color:var(--brand); font-weight:600; }
+  @media (max-width:800px) { #editor { left:12px; top:56px; width:calc(100% - 24px); bottom:auto; max-height:46%; } }
   .arr { width:18px; height:18px; border-radius:50%; background:#fff; border:2px solid #1b5e20; color:#1b5e20; font-size:9px; line-height:14px; text-align:center; box-sizing:border-box; }
   .pin { width:20px; height:20px; border-radius:50%; border:3px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.6); box-sizing:border-box; }
   .pin.start { background:linear-gradient(90deg,#1b5e20 50%,#222 50%); }
@@ -132,6 +160,8 @@
     <div id="livebar"></div>
     <div id="elev"></div>
     <div id="info"></div>
+    <button id="editbtn" title="Trim, reroute, draw or rename this walk, then save it to your box">✎ Customise</button>
+    <div id="editor"></div>
     <button id="revbtn" title="Walk it the other way round: the start and end swap places">⇄ Swap start / end</button>
   </div>
 </main>
@@ -388,6 +418,36 @@ function shouldReverseForOrigin(chain, o) {   // a walk that ends at the searche
   const p = [o.lat, o.lon], dS = havM(chain[0], p), dE = havM(chain[chain.length - 1], p);
   return dE + 100 < dS && dE <= 3000;
 }
+function sameLL(a, b) { return Math.abs(a[0] - b[0]) < 1e-7 && Math.abs(a[1] - b[1]) < 1e-7; }
+function concatLegs(legs) {                    // join legs end to end (the shared joint point is kept once)
+  const out = [];
+  for (const leg of legs) for (let i = 0; i < leg.length; i++) { if (i === 0 && out.length && sameLL(out[out.length - 1], leg[0])) continue; out.push(leg[i]); }
+  return out;
+}
+function sliceChain(chain, cum, a0, a1) {     // the part of a route between two distances (metres) along it
+  const out = [pointAt(chain, cum, a0)];
+  for (let i = 0; i < chain.length; i++) if (cum[i] > a0 + 0.01 && cum[i] < a1 - 0.01) out.push(chain[i]);
+  out.push(pointAt(chain, cum, a1));
+  return out;
+}
+function nearestLeg(legs, lat, lon) {         // which leg of the route a map click is closest to
+  let best = {index: -1, off: Infinity};
+  legs.forEach((leg, i) => { if (leg.length > 1) { const d = distToRoute(lat, lon, [leg]); if (d < best.off) best = {index: i, off: d}; } });
+  return best;
+}
+function splitLegAt(leg, lat, lon) {          // cut one leg in two at the point of it nearest to a click; null if that is an end
+  const cum = cumDist(leg), total = cum[cum.length - 1], a = alongRoute(lat, lon, leg, cum).along;
+  if (a < 1 || a > total - 1) return null;
+  return {first: sliceChain(leg, cum, 0, a), second: sliceChain(leg, cum, a, total), at: pointAt(leg, cum, a)};
+}
+function thinChain(chain, max) {              // keep at most max points, always including the first and the last
+  if (chain.length <= max) return chain;
+  const out = [], step = (chain.length - 1) / (max - 1);
+  for (let i = 0; i < max; i++) out.push(chain[Math.round(i * step)]);
+  return out;
+}
+function ascentOf(elev) { let g = 0; for (let i = 1; i < elev.length; i++) { const d = elev[i] - elev[i - 1]; if (d > 1) g += d; } return g; }
+function routeKind(chain, totalM) { return totalM > 500 && havM(chain[0], chain[chain.length - 1]) < 150 ? 'Loop' : 'Point to point'; }
 // END NAV
 
 let routeLayer = null;
@@ -426,7 +486,10 @@ function routeToStart(r, out, btn) {
 
 // ---- Selected walk: styled route, live GPS dot and elevation profile ----
 let sel = null;   // the walk currently shown in "navigation view"
+let ed = null;    // the walk being customised (see the editor below)
 function clearSelection() {
+  if (ed) endEdit(false);
+  $('editbtn').style.display = 'none';
   const inf = $('info'); inf.style.display = 'none'; inf.textContent = ''; $('revbtn').style.display = 'none';
   if (!sel) return;
   if (sel.watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(sel.watchId);
@@ -449,24 +512,271 @@ function selectWalk(r) {
   if (sel && sel.r.osm_id === r.osm_id) return;
   clearSelection();
   const chain = r.line && r.line[0]; if (!chain || chain.length < 2) return;
-  const s = sel = {r, chain, cum: cumDist(chain), layers: [], watchId: null, me: null, acc: null, hover: null, profile: null, chart: null};
+  const s = sel = {r, chain, cum: cumDist(chain), layers: [], routeLayers: [], watchId: null, me: null, acc: null, hover: null, profile: null, chart: null};
   if (lines[r.osm_id]) lines[r.osm_id].setStyle({opacity: 0});
   const add = l => { l.addTo(map); s.layers.push(l); return l; };
+  const addR = l => { add(l); s.routeLayers.push(l); return l; };   // the styled route, hidden while editing
   const icon = (html, size) => L.divIcon({className: '', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2]});
   const opts = {lineCap: 'round', lineJoin: 'round', interactive: false};
-  const paths = r.line.map(c => add(L.polyline(c, Object.assign({color: '#1b5e20', weight: 11, opacity: 1}, opts))));
-  r.line.forEach(c => add(L.polyline(c, Object.assign({color: '#66bb6a', weight: 7, opacity: 1}, opts))));
+  const paths = r.line.map(c => addR(L.polyline(c, Object.assign({color: '#1b5e20', weight: 11, opacity: 1}, opts))));
+  r.line.forEach(c => addR(L.polyline(c, Object.assign({color: '#66bb6a', weight: 7, opacity: 1}, opts))));
   const total = s.cum[s.cum.length - 1];
-  s.arrows = add(L.layerGroup());
-  add(L.marker(chain[0], {icon: icon('<div class="pin start"></div>', 20), interactive: false, keyboard: false}));
-  add(L.marker(chain[chain.length - 1], {icon: icon('<div class="pin end">⚑</div>', 20), interactive: false, keyboard: false}));
+  s.arrows = addR(L.layerGroup());
+  addR(L.marker(chain[0], {icon: icon('<div class="pin start"></div>', 20), interactive: false, keyboard: false}));
+  addR(L.marker(chain[chain.length - 1], {icon: icon('<div class="pin end">⚑</div>', 20), interactive: false, keyboard: false}));
   map.fitBounds(L.featureGroup(paths).getBounds(), {paddingTopLeft: [40, 50], paddingBottomRight: [40, 150], animate: false});
   drawArrows(s);
+  $('editbtn').style.display = 'block';
   const rb = $('revbtn'); rb.style.display = 'block'; rb.className = r.reversed ? 'on' : ''; rb.textContent = r.reversed ? '⇄ Reversed: tap to restore' : '⇄ Swap start / end';
   loadProfile(s);
   loadInfo(s);
   startLive(s);
 }
+
+// ======================= Customise: trim, reshape with waypoints, draw, details, save =======================
+const hist = x => JSON.parse(JSON.stringify(x));
+function edChain() { return concatLegs(ed.legs); }
+function edDo(fn) {                              // run edits one after another, so quick clicks cannot overlap
+  const mine = ed; mine.busy++; edStats();
+  mine.q = mine.q.then(async () => { if (ed === mine) await fn(); }).catch(e => { if (ed === mine) mine.notice = String(e.message || e); })
+    .finally(() => { mine.busy--; if (ed === mine) edRedraw(); });
+}
+function edSnap() { ed.hist.push(hist({wps: ed.wps, legs: ed.legs})); if (ed.hist.length > 60) ed.hist.shift(); ed.redo = []; }
+function edRestore(st) { ed.wps = st.wps; ed.legs = st.legs; ed.trim = null; edRedraw(); }
+async function edLeg(a, b) {                     // the path between two points: along footpaths (NZ) or a straight line
+  const straight = [[a.lat, a.lon], [b.lat, b.lon]];
+  if (!ed.snap || !ROUTING) return straight;
+  try {
+    const resp = await fetch('/api/route', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: 'leg', from: [a.lat, a.lon], to: [b.lat, b.lon]})});
+    const j = await resp.json().catch(() => ({}));
+    if (!resp.ok || !j.shape || j.shape.length < 2) throw new Error(j.error || ('routing failed (' + resp.status + ')'));
+    const sh = j.shape.slice(); sh[0] = [a.lat, a.lon]; sh[sh.length - 1] = [b.lat, b.lon];
+    ed.notice = ''; return sh;
+  } catch (e) { ed.notice = 'Could not follow paths (' + e.message + '). A straight line was used.'; return straight; }
+}
+function edMapClick(e) {
+  if (!ed || ed.dialog || ed.tool === 'trim') return;
+  const P = {lat: e.latlng.lat, lon: e.latlng.lng, split: false};
+  edDo(async () => {
+    if (ed.tool === 'draw') {                    // extend the route from its last point
+      edSnap();
+      if (!ed.wps.length) ed.wps.push(P);
+      else { const leg = await edLeg(ed.wps[ed.wps.length - 1], P); ed.wps.push(P); ed.legs.push(leg); }
+      return;
+    }
+    const near = nearestLeg(ed.legs, P.lat, P.lon); if (near.index < 0) return;
+    const i = near.index, mpp = 156543.03392 * Math.cos(P.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+    const sp = near.off < Math.max(12, 10 * mpp) ? splitLegAt(ed.legs[i], P.lat, P.lon) : null;
+    edSnap();
+    if (sp) { ed.wps.splice(i + 1, 0, {lat: sp.at[0], lon: sp.at[1], split: true}); ed.legs.splice(i, 1, sp.first, sp.second); return; }   // a point ON the route just splits it
+    // A point off the route is a detour. Only a short stretch of the route either side of it is replaced; the rest of the route is kept as it was.
+    const leg = ed.legs[i], cum = cumDist(leg), total = cum[cum.length - 1], aN = alongRoute(P.lat, P.lon, leg, cum).along, S = 150;
+    const aA = Math.max(0, aN - S), aB = Math.min(total, aN + S);
+    const first = aA > 1 ? sliceChain(leg, cum, 0, aA) : null, second = aB < total - 1 ? sliceChain(leg, cum, aB, total) : null;
+    const A = first ? {lat: first[first.length - 1][0], lon: first[first.length - 1][1], split: true} : ed.wps[i];
+    const B = second ? {lat: second[0][0], lon: second[0][1], split: true} : ed.wps[i + 1];
+    const l1 = await edLeg(A, P), l2 = await edLeg(P, B);
+    const newWps = [], newLegs = [];
+    if (first) { newLegs.push(first); newWps.push(A); }
+    newLegs.push(l1); newWps.push(P); newLegs.push(l2);
+    if (second) { newWps.push(B); newLegs.push(second); }
+    ed.wps.splice(i + 1, 0, ...newWps); ed.legs.splice(i, 1, ...newLegs);
+  });
+}
+function edMove(i, ll) {
+  edDo(async () => {
+    edSnap(); const P = {lat: ll.lat, lon: ll.lng, split: false};
+    const left = i > 0 ? await edLeg(ed.wps[i - 1], P) : null, right = i < ed.wps.length - 1 ? await edLeg(P, ed.wps[i + 1]) : null;
+    if (left) ed.legs[i - 1] = left; if (right) ed.legs[i] = right; ed.wps[i] = P;
+  });
+}
+function edRemove(i) {
+  const n = ed.wps.length, interior = i > 0 && i < n - 1;
+  if (!interior && ed.tool !== 'draw') return;     // the start and end can only be dragged (or removed in draw mode)
+  if (n <= 2 && ed.tool !== 'draw') return;
+  edDo(async () => {
+    edSnap();
+    if (i === 0) { ed.wps.shift(); ed.legs.shift(); }
+    else if (i === n - 1) { ed.wps.pop(); ed.legs.pop(); }
+    else if (ed.wps[i].split) { ed.legs.splice(i - 1, 2, concatLegs([ed.legs[i - 1], ed.legs[i]])); ed.wps.splice(i, 1); }
+    else { const leg = await edLeg(ed.wps[i - 1], ed.wps[i + 1]); ed.legs.splice(i - 1, 2, leg); ed.wps.splice(i, 1); }
+  });
+}
+function edUndo() { if (!ed || !ed.hist.length || ed.busy) return; ed.redo.push(hist({wps: ed.wps, legs: ed.legs})); edRestore(ed.hist.pop()); }
+function edRedo() { if (!ed || !ed.redo.length || ed.busy) return; ed.hist.push(hist({wps: ed.wps, legs: ed.legs})); edRestore(ed.redo.pop()); }
+function edStartOver() { if (!ed) return; edSnap(); ed.wps = []; ed.legs = []; ed.trim = null; setTool('draw'); }
+function edApplyTrim() {
+  if (!ed || !ed.trim) return;
+  const ch = edChain(), cum = cumDist(ch), t = ed.trim;
+  if (t.a0 < 1 && t.a1 > cum[cum.length - 1] - 1) return;
+  edSnap();
+  const cut = sliceChain(ch, cum, t.a0, t.a1);
+  ed.legs = [cut]; ed.wps = [{lat: cut[0][0], lon: cut[0][1], split: false}, {lat: cut[cut.length - 1][0], lon: cut[cut.length - 1][1], split: false}];
+  ed.trim = null; edRedraw();
+}
+function setTool(t) {
+  if (!ed) return; ed.tool = t; ed.trim = null;
+  document.querySelectorAll('#editor .tools3 button').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
+  $('edhint').textContent = {reshape: 'Click the map to add a detour point (click on the route itself to just split it). Drag points to move them. Click a point to remove it.',
+    draw: 'Click the map to add points to the end of the route. “Start over” clears the route first.',
+    trim: 'Drag the two orange handles along the route to cut off the start or the end, then press Apply trim.'}[t];
+  $('edapply').style.display = t === 'trim' ? '' : 'none';
+  if (t === 'trim') {                              // bring the whole route into clear view so both handles can be reached
+    const ch = edChain(); const narrow = window.innerWidth <= 800;
+    if (ch.length > 1) map.fitBounds(ch, {paddingTopLeft: [narrow ? 20 : 330, narrow ? 220 : 60], paddingBottomRight: [40, 190], animate: false});
+  }
+  edRedraw();
+}
+function edStats() {
+  if (!ed) return;
+  const ch = ed.chain || [], tot = ed.cum && ed.cum.length ? ed.cum[ed.cum.length - 1] : 0, parts = [];
+  if (ch.length > 1) {
+    const km = tot / 1000, asc = ed.profile ? ascentOf(ed.profile.elev_m) : null;
+    parts.push(km.toFixed(2) + ' km', routeKind(ch, tot));
+    if (asc !== null) parts.push('↑ ' + Math.round(asc) + ' m');
+    parts.push('about ' + fmtMinutes(Math.round(km * 12 + (asc || 0) * 0.1)));
+  } else parts.push(ed.wps.length ? 'Add a second point' : 'Click the map to start drawing');
+  $('edstats').textContent = parts.join(' · ') + (ed.busy ? '  (working out the path…)' : '');
+  $('ednotice').textContent = ed.notice || '';
+  $('edundo').disabled = !ed.hist.length || !!ed.busy; $('edredo').disabled = !ed.redo.length || !!ed.busy;
+  $('edsave').disabled = ch.length < 2 || tot < 20 || !!ed.busy;
+}
+function fmtMinutes(m) { return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min'; }
+function edRedraw() {
+  if (!ed) return;
+  ed.layer.clearLayers();
+  const chain = edChain(); ed.chain = chain; ed.cum = chain.length > 1 ? cumDist(chain) : [0];
+  const add = l => { l.addTo(ed.layer); return l; };
+  if (ed.orig.length > 1) add(L.polyline(ed.orig, {color: '#888', weight: 3, opacity: .9, dashArray: '6 8', interactive: false}));   // the original, for reference
+  if (chain.length > 1) {
+    add(L.polyline(chain, {color: '#1b5e20', weight: 11, opacity: 1, lineCap: 'round', lineJoin: 'round', interactive: false}));
+    add(L.polyline(chain, {color: '#66bb6a', weight: 7, opacity: 1, lineCap: 'round', lineJoin: 'round', interactive: false}));
+  }
+  const icon = (cls, html) => L.divIcon({className: '', html: '<div class="' + cls + '">' + (html || '') + '</div>', iconSize: [20, 20], iconAnchor: [10, 10]});
+  if (ed.tool === 'trim' && chain.length > 1) {
+    const total = ed.cum[ed.cum.length - 1]; if (!ed.trim) ed.trim = {a0: 0, a1: total};
+    const t = ed.trim;
+    if (t.a0 > 0.5) add(L.polyline(sliceChain(chain, ed.cum, 0, t.a0), {color: '#e8590c', weight: 5, opacity: .9, dashArray: '4 8', interactive: false}));
+    if (t.a1 < total - 0.5) add(L.polyline(sliceChain(chain, ed.cum, t.a1, total), {color: '#e8590c', weight: 5, opacity: .9, dashArray: '4 8', interactive: false}));
+    ['a0', 'a1'].forEach(key => {
+      const mk = add(L.marker(pointAt(chain, ed.cum, t[key]), {icon: icon('wp cut', ''), draggable: true, keyboard: false, zIndexOffset: 800}));
+      mk.on('drag', () => {
+        const a = alongRoute(mk.getLatLng().lat, mk.getLatLng().lng, chain, ed.cum).along;
+        t[key] = key === 'a0' ? Math.max(0, Math.min(a, t.a1 - 20)) : Math.min(total, Math.max(a, t.a0 + 20));
+        mk.setLatLng(pointAt(chain, ed.cum, t[key]));
+      });
+      mk.on('dragend', () => { edRedraw(); });
+    });
+    $('edapply').disabled = t.a0 < 1 && t.a1 > total - 1;
+  } else {
+    ed.wps.forEach((w, i) => {
+      const last = i === ed.wps.length - 1 && ed.wps.length > 1;
+      const mk = add(L.marker([w.lat, w.lon], {icon: icon(i === 0 ? 'pin start' : last ? 'pin end' : 'wp', last ? '⚑' : ''), draggable: true, keyboard: false, zIndexOffset: 700}));
+      mk.on('dragend', () => edMove(i, mk.getLatLng()));
+      mk.on('click', () => edRemove(i));
+    });
+  }
+  edStats(); edProfileLater();
+}
+function edProfileLater() {                      // refresh the elevation chart a moment after the last change
+  clearTimeout(ed.ptimer);
+  const mine = ed;
+  mine.ptimer = setTimeout(async () => {
+    if (ed !== mine || !mine.chain || mine.chain.length < 2 || mine.cum[mine.cum.length - 1] < 20 || !sel) return;
+    try {
+      const resp = await fetch('/api/profile', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({chain: thinChain(mine.chain, 1500)})});
+      const j = await resp.json().catch(() => ({})); if (!resp.ok) throw new Error(j.error || 'No elevation');
+      if (ed !== mine) return;
+      mine.profile = j; sel.chain = mine.chain; sel.cum = mine.cum; sel.profile = j; $('elev').style.display = 'block'; drawProfile(sel); edStats();
+    } catch (e) { if (ed === mine) { mine.profile = null; edStats(); } }
+  }, 700);
+}
+function startEdit() {
+  if (!sel || ed) return;
+  const r = sel.r, orig = sel.chain.map(p => p.slice());
+  ed = {r, s: sel, orig, origCum: sel.cum, origChain: sel.chain, origProfile: sel.profile, wps: [], legs: [], hist: [], redo: [], tool: 'reshape',
+        snap: ROUTING, layer: L.layerGroup().addTo(map), q: Promise.resolve(), busy: 0, notice: '', trim: null, profile: null, chain: orig, cum: sel.cum,
+        name: r.name, desc: r.description || '', diff: r.difficulty || '', rating: r.my_rating || 0, note: r.my_note || '', dialog: false};
+  ed.wps = [{lat: orig[0][0], lon: orig[0][1], split: false}, {lat: orig[orig.length - 1][0], lon: orig[orig.length - 1][1], split: false}];
+  ed.legs = [orig.map(p => p.slice())];
+  sel.routeLayers.forEach(l => map.removeLayer(l));
+  ['info', 'revbtn', 'editbtn'].forEach(id => $(id).style.display = 'none');
+  buildEditor(); setTool('reshape');
+}
+function endEdit(restore) {
+  if (!ed) return;
+  const e = ed; ed = null; clearTimeout(e.ptimer); map.removeLayer(e.layer); $('editor').style.display = 'none'; $('editor').textContent = '';
+  const dlg = $('savedlg'); if (dlg) dlg.remove();
+  if (sel && sel === e.s) {
+    sel.chain = e.origChain; sel.cum = e.origCum; sel.profile = e.origProfile;
+    sel.routeLayers.forEach(l => l.addTo(map));
+    if (restore) { $('info').style.display = 'block'; $('revbtn').style.display = 'block'; $('editbtn').style.display = 'block'; if (sel.profile) { $('elev').style.display = 'block'; drawProfile(sel); } }
+  }
+}
+function buildEditor() {
+  const el = $('editor'); el.textContent = ''; el.style.display = 'block';
+  const mk = (tag, props, kids) => { const n = document.createElement(tag); Object.assign(n, props || {}); (kids || []).forEach(k => n.append(k)); return n; };
+  el.appendChild(mk('h3', {textContent: 'Customise this walk'}));
+  const tools = mk('div', {className: 'tools3'});
+  [['reshape', 'Reshape'], ['draw', 'Draw'], ['trim', 'Trim']].forEach(([k, label]) => { const b = mk('button', {textContent: label, onclick: () => setTool(k)}); b.dataset.tool = k; tools.appendChild(b); });
+  el.append(tools, mk('div', {id: 'edhint', className: 'hint'}));
+  const snapBox = mk('input', {type: 'checkbox', id: 'edsnap', checked: ed.snap && ROUTING, disabled: !ROUTING, onchange: () => { ed.snap = snapBox.checked; }});
+  const snapLbl = mk('label', {title: ROUTING ? '' : 'Needs the New Zealand routing engine'}, [snapBox, ' Follow footpaths between points' + (ROUTING ? '' : ' (not available)')]);
+  snapLbl.style.cssText = 'display:flex;gap:6px;align-items:center;color:inherit;font-size:13px;margin:4px 0';
+  el.appendChild(snapLbl);
+  const row = mk('div', {className: 'row'}, [mk('button', {id: 'edundo', textContent: '↶ Undo', onclick: edUndo}), mk('button', {id: 'edredo', textContent: '↷ Redo', onclick: edRedo}),
+    mk('button', {textContent: 'Start over', onclick: edStartOver}), mk('button', {id: 'edapply', textContent: '✂ Apply trim', onclick: edApplyTrim})]);
+  el.appendChild(row);
+  el.append(mk('div', {id: 'edstats', className: 'stats'}), mk('div', {id: 'ednotice', className: 'notice'}));
+  // details
+  el.appendChild(mk('label', {textContent: 'Name'}));
+  el.appendChild(mk('input', {type: 'text', id: 'edname', value: ed.name, oninput: ev => { ed.name = ev.target.value; }}));
+  const sel2 = mk('select', {id: 'eddiff', onchange: ev => { ed.diff = ev.target.value; }});
+  ['', 'Easy', 'Moderate', 'Hard'].concat(ed.diff && !['Easy', 'Moderate', 'Hard'].includes(ed.diff) ? [ed.diff] : []).forEach(v => sel2.appendChild(mk('option', {value: v, textContent: v || '(not set)'})));
+  sel2.value = ed.diff;
+  el.append(mk('label', {textContent: 'Difficulty'}), sel2);
+  el.append(mk('label', {textContent: 'Description'}), mk('textarea', {id: 'eddesc', value: ed.desc, oninput: ev => { ed.desc = ev.target.value; }}));
+  const stars = mk('div', {className: 'stars'});
+  const paint = () => [...stars.children].forEach((s_, i) => s_.classList.toggle('on', i < ed.rating));
+  for (let i = 1; i <= 5; i++) stars.appendChild(mk('span', {textContent: '★', title: i + ' star(s)', onclick: () => { ed.rating = ed.rating === i ? 0 : i; paint(); }}));
+  paint();
+  el.append(mk('label', {textContent: 'My rating'}), stars, mk('label', {textContent: 'My notes'}), mk('textarea', {id: 'ednote', value: ed.note, oninput: ev => { ed.note = ev.target.value; }}));
+  if (ed.r.line && ed.r.line.length > 1) el.appendChild(mk('div', {className: 'hint', textContent: 'This walk has ' + ed.r.line.length + ' separate pieces. Only the main track is kept when you save.'}));
+  el.appendChild(mk('div', {className: 'foot2'}, [mk('button', {textContent: 'Cancel', onclick: () => { endEdit(true); }}), mk('button', {id: 'edsave', className: 'go', textContent: 'Save to my box…', onclick: edSave})]));
+}
+function edSave() {                              // ask at the moment of saving: new walk or replace the original
+  if (!ed || ed.dialog) return; ed.dialog = true;
+  const r = ed.r, canReplace = !!r.added;
+  const dlg = document.createElement('div'); dlg.id = 'savedlg';
+  dlg.innerHTML = '<div class="box"><h3>Save to my box</h3>' +
+    '<label class="opt"><input type="radio" name="svmode" value="new" checked> <b>Save as a new walk</b><div class="sub" style="color:#68746c;font-size:12px">Your version is saved next to the original, which stays as it is.</div></label>' +
+    '<label class="opt' + (canReplace ? '' : ' dis') + '"><input type="radio" name="svmode" value="replace"' + (canReplace ? '' : ' disabled') + '> <b>Replace the original</b><div class="sub" style="color:#68746c;font-size:12px">' +
+    (canReplace ? 'Overwrites the saved walk with your changes.' : 'Only walks that are already in your box can be replaced.') + '</div></label>' +
+    '<label style="font-size:12px;color:#68746c">Name</label><input type="text" id="svname"><div id="svmsg" style="color:#b3261e;font-size:13px;min-height:16px"></div>' +
+    '<div class="btns"><button id="svcancel">Back to editing</button><button class="go" id="svgo">Save</button></div></div>';
+  $('mapwrap').appendChild(dlg);
+  const nameIn = $('svname'); let touched = false;
+  const fill = () => { if (!touched) nameIn.value = ed.name + (dlg.querySelector('input[name=svmode]:checked').value === 'new' && ed.name === r.name ? ' (custom)' : ''); };
+  nameIn.oninput = () => { touched = true; }; dlg.querySelectorAll('input[name=svmode]').forEach(x => x.onchange = fill); fill();
+  $('svcancel').onclick = () => { dlg.remove(); if (ed) ed.dialog = false; };
+  $('svgo').onclick = async () => {
+    const saveMode = dlg.querySelector('input[name=svmode]:checked').value; $('svgo').disabled = true; $('svmsg').textContent = 'Saving…';
+    try {
+      const e = ed, chain = thinChain(e.chain, 5000);
+      const saved = await post('/api/customise', {base_id: r.osm_id, mode: saveMode, chain, name: nameIn.value, description: e.desc, difficulty: e.diff, rating: e.rating || null, note: e.note});
+      dlg.remove();
+      if (saveMode === 'replace') {
+        endEdit(false); Object.assign(r, saved, {reversed: false, autoSwapped: null}); render(); focus(r.osm_id);
+        status('Replaced “' + saved.name + '” in your box with your version.');
+      } else {
+        endEdit(true); status('Saved “' + saved.name + '” to your box as a new walk. Open “My walk box” to find it.');
+        if (mode === 'box') loadBox();
+      }
+    } catch (err) { $('svmsg').textContent = err.message; $('svgo').disabled = false; }
+  };
+}
+map.on('click', e => { if (ed) edMapClick(e); });
+$('editbtn').onclick = startEdit;
 
 let infoOpen = window.innerWidth > 800;
 function dayLabel(d, i) { return i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : new Date(d + 'T12:00:00').toLocaleDateString(undefined, {weekday: 'short'}); }

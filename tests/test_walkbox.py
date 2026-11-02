@@ -649,6 +649,9 @@ lg = c.post("/api/route", json={"mode": "leg", "from": [-36.79, 174.77], "to": [
 assert lg.status_code == 200 and vcalls[-1][0].endswith("/route") and len(lg.get_json()["shape"]) == 4
 wb.requests.post = real_post
 
+page = c.get("/").data
+assert b'id="editbtn"' in page and b"startEdit" in page and b"edSave" in page and b"nearestLeg" in page
+
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data

@@ -33,6 +33,23 @@ the way round you are looking at.
 
 The route itself is fetched only when you **click a walk** (or when you add it to your box). After that the walk view opens, with its exact length.
 
+## Customising a walk
+
+Open a walk and press **✎ Customise** (top right of the map). The route is shown in green with the original dashed in grey, and a panel on the left
+has these tools; the distance, type, climb and time update as you go, and the elevation chart redraws:
+
+- **Reshape**: click the map to add a **detour** point. Only about 150 m of the route either side of it is replaced, the rest is kept as it was. Click **on** the
+  route itself and it is just split there. Drag any point to move it, and click a point to remove it.
+- **Draw**: click to add points to the end of the route. **Start over** clears the route first, so you can draw a walk from scratch.
+- **Trim**: drag the two orange handles along the route to cut off the start or the end, then press **Apply trim**.
+- **Follow footpaths between points** (on by default in New Zealand) works out the path between points with the routing engine; with it off, or if
+  routing is unavailable, points are joined with straight lines.
+- **↶ Undo / ↷ Redo** for every change, and fields for the **name, difficulty, description, your rating and notes**.
+
+**Save to my box…** asks you at that moment whether to **save a new walk** (your version is saved beside the original, marked "Custom") or **replace the original**
+(only for walks already in your box). Customised walks keep the original source's credit in their GPX. If a walk has several separate pieces,
+only the main track is kept.
+
 ## Weather and nearby places
 
 When a walk is open, a **Weather & nearby** card appears on the map:
