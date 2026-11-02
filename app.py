@@ -20,7 +20,7 @@ import time
 import zlib
 import zipfile
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as futures_wait
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
 
@@ -97,11 +97,10 @@ _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
 _weather_cache = {}
-_search_cache = {}
-SEARCH_TTL = int(os.environ.get("SEARCH_CACHE_SECONDS", "900"))
-_places_cache = {}
-_terrain_cache = {}
-_profile_mem = {}
+SEARCH_TTL = int(os.environ.get("SEARCH_CACHE_SECONDS", "21600"))
+HEDGE_SECONDS = float(os.environ.get("OVERPASS_HEDGE_SECONDS", "6"))
+OVERPASS_TIMEOUT = int(os.environ.get("OVERPASS_TIMEOUT", "30"))
+KV_TTL = {"light": 7 * 86400, "detail": 7 * 86400, "places": 86400, "terrain": 7 * 86400, "profile": 30 * 86400}
 _rate_calls = {}
 
 
@@ -125,6 +124,7 @@ CREATE TABLE IF NOT EXISTS walks (
     added_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS walks_name ON walks(name);
+CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, ts REAL NOT NULL);
 """
 EXTRA_COLUMNS = {
     "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
@@ -429,20 +429,110 @@ def _short_error(url, exc):
     return "%s: %s" % (host, reason)
 
 
+def _overpass_once(url, query):
+    try:
+        r = requests.post(url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=OVERPASS_TIMEOUT)
+        if r.status_code != 200:
+            raise RuntimeError("%s: HTTP %s" % (url.split("/")[2], r.status_code))
+        return r.json()
+    except requests.RequestException as ex:
+        raise RuntimeError(_short_error(url, ex))
+    except ValueError as ex:
+        raise RuntimeError(_short_error(url, ex))
+
+
 def overpass(query):
+    """Ask the first server; if it has not answered within a few seconds ask the next one as well, and use whoever answers first."""
+    urls = OVERPASS_URLS
+    if not urls:
+        raise RuntimeError("No Overpass server configured")
     errors = []
     with _overpass_lock:
-        for url in OVERPASS_URLS:
-            try:
-                r = requests.post(url, data={"data": query},
-                                  headers={"User-Agent": USER_AGENT}, timeout=45)
-                if r.status_code == 200:
-                    return r.json()
-                errors.append("%s: HTTP %s" % (url.split("/")[2], r.status_code))
-            except (requests.RequestException, ValueError) as e:
-                errors.append(_short_error(url, e))
-            time.sleep(1)
-    raise RuntimeError("; ".join(errors) or "No Overpass server configured")
+        pool = ThreadPoolExecutor(max_workers=len(urls))
+        try:
+            pending = {pool.submit(_overpass_once, urls[0], query): urls[0]}
+            nxt = 1
+            while pending:
+                hedge = HEDGE_SECONDS if nxt < len(urls) else None
+                done, _ = futures_wait(list(pending), timeout=hedge, return_when=FIRST_COMPLETED)
+                if not done:                                    # the server is slow: try the next one too
+                    pending[pool.submit(_overpass_once, urls[nxt], query)] = urls[nxt]
+                    nxt += 1
+                    continue
+                for fut in done:
+                    pending.pop(fut)
+                    try:
+                        return fut.result()
+                    except RuntimeError as ex:
+                        errors.append(str(ex))
+                if not pending and nxt < len(urls):            # everything so far failed: try the next one
+                    pending[pool.submit(_overpass_once, urls[nxt], query)] = urls[nxt]
+                    nxt += 1
+            raise RuntimeError("; ".join(errors))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+# --------------------------------------------------------------------------
+# Persistent cache: slow lookups are kept in the database so they survive restarts
+# --------------------------------------------------------------------------
+def kv_ttl(kind):
+    return SEARCH_TTL if kind == "search" else KV_TTL[kind]
+
+
+def kv_get(kind, key):
+    ttl = kv_ttl(kind)
+    if ttl <= 0:
+        return None
+    row = db().execute("SELECT v, ts FROM kv WHERE k=?", ("%s:%s" % (kind, key),)).fetchone()
+    if row and time.time() - row["ts"] < ttl:
+        try:
+            return json.loads(row["v"])
+        except ValueError:
+            return None
+    return None
+
+
+def kv_put(kind, key, obj):
+    if kv_ttl(kind) <= 0:
+        return
+    conn = db()
+    conn.execute("INSERT OR REPLACE INTO kv (k, v, ts) VALUES (?,?,?)", ("%s:%s" % (kind, key), json.dumps(obj), time.time()))
+    conn.commit()
+    if int(time.time()) % 50 == 0:                      # now and then, drop rows that are too old to be used
+        conn.execute("DELETE FROM kv WHERE ts < ?", (time.time() - max(max(KV_TTL.values()), SEARCH_TTL),))
+        conn.commit()
+
+
+def kv_put_many(kind, items):
+    if kv_ttl(kind) <= 0 or not items:
+        return
+    conn = db()
+    now = time.time()
+    conn.executemany("INSERT OR REPLACE INTO kv (k, v, ts) VALUES (?,?,?)",
+                     [("%s:%s" % (kind, k), json.dumps(v), now) for k, v in items])
+    conn.commit()
+
+
+def cached_walk(osm_id):
+    """A search result or a loaded walk from memory or the cache (route included when it was loaded before)."""
+    with _cache_lock:
+        wk = _cache.get(osm_id)
+    if wk and wk.get("chains"):
+        return wk
+    full = kv_get("detail", osm_id)
+    if full:
+        with _cache_lock:
+            _cache[osm_id] = full
+        return full
+    if wk:
+        return wk
+    light = kv_get("light", osm_id)
+    if light:
+        with _cache_lock:
+            _cache[osm_id] = light
+        return light
+    return None
 
 
 def make_light(osm_id, source, name, recipe, tags=None, distance_km=None, approx=False, centre=None, **extra):
@@ -697,6 +787,10 @@ def load_detail(wk):
             full[k] = wk[k]
     with _cache_lock:
         _cache[wk["osm_id"]] = full
+    try:
+        kv_put("detail", wk["osm_id"], full)
+    except Exception:                                       # the cache is a convenience, never a reason to fail
+        pass
     return full
 
 
@@ -705,8 +799,7 @@ def main_chain(osm_id):
     row = db().execute("SELECT geom FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
     if row:
         return json.loads(row["geom"])[0], True
-    with _cache_lock:
-        wk = _cache.get(osm_id)
+    wk = cached_walk(osm_id)
     if not wk:
         abort(404)
     if not wk.get("chains"):
@@ -870,19 +963,18 @@ def api_search():
     if not sources:
         return jsonify(error="Choose at least one source"), 400
     t0 = time.time()
-    key = (round(s, 3), round(w, 3), round(n, 3), round(e, 3), tuple(sorted(sources)))
-    hit = _search_cache.get(key)
-    if hit and time.time() - hit[0] < SEARCH_TTL:
-        walks, problems = hit[1], hit[2]
+    key = "%.3f,%.3f,%.3f,%.3f|%s" % (s, w, n, e, ",".join(sorted(sources)))
+    hit = kv_get("search", key)
+    if hit:
+        walks, problems = hit["walks"], []
         with _cache_lock:                              # make sure the results can still be opened
             for wk in walks:
                 _cache.setdefault(wk["osm_id"], wk)
     else:
         walks, problems = search_all(s, w, n, e, sources)
         if not problems:                               # never remember a partial or failed search
-            _search_cache[key] = (time.time(), walks, problems)
-            if len(_search_cache) > 200:
-                _search_cache.clear()
+            kv_put("search", key, {"walks": walks})
+            kv_put_many("light", [(wk["osm_id"], wk) for wk in walks if not wk.get("chains")])
     if not walks and problems:
         return jsonify(error="Could not search: " + " | ".join(problems)), 502
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
@@ -901,8 +993,11 @@ def api_add():
         return jsonify(error="ids must be numbers"), 400
     if not ids:
         return jsonify(error="No walks selected"), 400
-    with _cache_lock:
-        found = {i: _cache[i] for i in ids if i in _cache}
+    found = {}
+    for i in ids:
+        wk = cached_walk(i)
+        if wk:
+            found[i] = wk
     missing = [i for i in ids if i not in found]
     expired = [i for i in missing if i >= PATH_BASE]
     if expired:
@@ -959,8 +1054,7 @@ def api_detail():
         d = dict(row)
         d["chains"] = json.loads(d["geom"])
         return jsonify(public(d, True))
-    with _cache_lock:
-        wk = _cache.get(wid)
+    wk = cached_walk(wid)
     if not wk:
         return jsonify(error="That result has expired. Search the area again."), 409
     if not wk.get("chains"):
@@ -1332,22 +1426,20 @@ def fetch_places(chain):
 
 @app.get("/api/walks/<int:osm_id>/places")
 def api_places(osm_id):
-    hit = _places_cache.get(osm_id)
-    if hit and time.time() - hit[0] < 3600:
-        return jsonify(hit[1])
     try:
         chain, _ = main_chain(osm_id)
     except RuntimeError as ex:
         return jsonify(error=str(ex)), 502
+    saved = kv_get("places", "%s:%s" % (osm_id, len(chain)))
+    if saved:
+        return jsonify(saved)
     if not rate_ok("places", 20):
         return jsonify(error="Too many lookups just now. Try again in a minute."), 429
     try:
         res = fetch_places(chain)
     except RuntimeError as ex:
         return jsonify(error="Nearby places unavailable: %s" % ex), 502
-    _places_cache[osm_id] = (time.time(), res)
-    if len(_places_cache) > 300:
-        _places_cache.clear()
+    kv_put("places", "%s:%s" % (osm_id, len(chain)), res)
     return jsonify(res)
 
 
@@ -1478,6 +1570,10 @@ def api_profile(osm_id):
         chain, in_box = main_chain(osm_id)
     except RuntimeError as ex:
         return jsonify(error=str(ex)), 502
+    if not in_box:
+        saved = kv_get("profile", "%s:%s" % (osm_id, len(chain)))
+        if saved:
+            return jsonify(saved)
     if not rate_ok("profile", 60):
         return jsonify(error="Too many elevation lookups just now. Try again in a minute."), 429
     try:
@@ -1485,9 +1581,7 @@ def api_profile(osm_id):
     except RuntimeError as ex:
         return jsonify(error="Elevation profile unavailable: %s" % ex), 502
     if not in_box:
-        _profile_mem[(osm_id, len(chain))] = prof
-        if len(_profile_mem) > 200:
-            _profile_mem.clear()
+        kv_put("profile", "%s:%s" % (osm_id, len(chain)), prof)
     if in_box:
         conn = db()
         conn.execute("UPDATE walks SET profile=? WHERE osm_id=?", (json.dumps(prof), osm_id))
@@ -1737,25 +1831,23 @@ def api_terrain(osm_id):
         chain, in_box = main_chain(osm_id)
     except RuntimeError as ex:
         return jsonify(error=str(ex)), 502
-    key = (osm_id, len(chain))
-    hit = _terrain_cache.get(key)
-    if hit and not in_box:
-        return jsonify(hit)
+    key = "%s:%s" % (osm_id, len(chain))
+    if not in_box:
+        saved = kv_get("terrain", key)
+        if saved:
+            return jsonify(saved)
     if not rate_ok("terrain", 20):
         return jsonify(error="Too many lookups just now. Try again in a minute."), 429
-    with _cache_lock:
-        cached_wk = _cache.get(osm_id) or {}
+    cached_wk = cached_walk(osm_id) or {}
     grade = (row["difficulty"] if row else cached_wk.get("difficulty"))
-    prof = json.loads(row["profile"]) if row and row["profile"] else _profile_mem.get(key)
+    prof = json.loads(row["profile"]) if row and row["profile"] else kv_get("profile", key)
     res = build_terrain(chain, grade, cached_profile=prof)
     if in_box and not res["notes"]:
         conn = db()
         conn.execute("UPDATE walks SET terrain=? WHERE osm_id=?", (json.dumps(res), osm_id))
         conn.commit()
     elif not in_box and not res["notes"]:
-        _terrain_cache[key] = res
-        if len(_terrain_cache) > 200:
-            _terrain_cache.clear()
+        kv_put("terrain", key, res)
     return jsonify(res)
 
 
@@ -1813,8 +1905,7 @@ def api_customise():
     note = str(b.get("note") or "").strip()[:2000] or None
     conn = db()
     base = conn.execute("SELECT * FROM walks WHERE osm_id=?", (base_id,)).fetchone()
-    with _cache_lock:
-        cached = _cache.get(base_id) or {}
+    cached = cached_walk(base_id) or {}
     if mode == "replace" and not base:
         return jsonify(error="Only a walk that is already in your box can be replaced. Save it as a new walk instead."), 400
     if base:

@@ -21,10 +21,16 @@ Pick any combination when you search:
 source gives one. No route outlines are downloaded at this stage, so it is quick. Lengths of OpenStreetMap named paths are rough (shown with a ~) and
 official OpenStreetMap routes show no length until opened.
 
+**Nothing is fetched twice.** Everything slow is remembered in your database (the `kv` table in `walkbox.db`), so it survives restarts and redeploys: finished searches for
+6 hours (`SEARCH_CACHE_SECONDS`), and each walk's route for 7 days, nearby places for 24 hours, surfaces and difficulty for 7 days and elevation for 30 days.
+Opening a walk you have opened before, searching an area again, or clicking away and back costs nothing. If an OpenStreetMap server has not answered within
+6 seconds (`OVERPASS_HEDGE_SECONDS`) the next one is asked as well and whichever answers first is used. The cache can be cleared by deleting the `kv` rows
+or by setting `SEARCH_CACHE_SECONDS=0` to turn off the search part.
+
 Each source is searched as its **own request**, and the page shows a source's walks the moment it answers: DOC and the council tracks usually come back
 in a second or two, while OpenStreetMap (routes and named paths) is the slowest because it runs on shared public servers. You can open a walk
 while the rest are still loading. The status line shows which sources are done and how long each took. Repeated searches of the same area are
-remembered for 15 minutes (`SEARCH_CACHE_SECONDS`). If OpenStreetMap is slow for you, untick "Official routes" or "Named paths", or list a faster
+remembered (see below). If OpenStreetMap is slow for you, untick "Official routes" or "Named paths", or list a faster
 Overpass server first in `OVERPASS_URLS`.
 
 **Searching for a place** (the box next to Go) also sets where walks should start: when you open a walk that ends at that place (within about 3 km), it is turned round so
@@ -155,7 +161,9 @@ To update after code changes: push to `main`, wait for the green tick on the Act
 | PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |
 | VALHALLA_URL | (blank) | Address of the Valhalla routing engine; blank hides the turn-by-turn buttons. |
 | WEATHER_URL | Open-Meteo forecast API | Weather service used by the weather card. |
-| SEARCH_CACHE_SECONDS | 900 | How long a finished search of the same area is remembered. |
+| SEARCH_CACHE_SECONDS | 21600 | How long a finished search of the same area is remembered. |
+| OVERPASS_HEDGE_SECONDS | 6 | Ask the next OpenStreetMap server if the first has not answered in this time. |
+| OVERPASS_TIMEOUT | 30 | Give up on one OpenStreetMap request after this many seconds. |
 | MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
 | MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
 | MIN_PATH_KM | 0.8 | Shortest named path (grouped by name) listed as a walk. |

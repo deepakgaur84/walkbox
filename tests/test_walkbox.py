@@ -197,9 +197,16 @@ def fake_get(url, **kw):
     return Resp(DOC_LIST if light else DOC_DETAIL)
 
 
+real_overpass = wb.overpass
 wb.overpass = fake_overpass
 wb.requests.get = fake_get
 c = wb.app.test_client()
+
+
+def kvclear():
+    conn = wb.sqlite3.connect(os.environ["DB_PATH"]); conn.execute("DELETE FROM kv"); conn.commit(); conn.close()
+
+
 
 # --- helpers
 chains = wb.chain_segments([[(0, 0), (0, 1)], [(1, 1), (0, 1)], [(1, 1), (2, 2)]])
@@ -262,17 +269,17 @@ wb.overpass = fake_overpass
 c.post("/api/search", json=body)      # refill the cache
 
 # --- repeated searches of the same area are served from a short-lived cache
-wb.SEARCH_TTL = 900; wb._search_cache.clear()
+wb.SEARCH_TTL = 900; kvclear()
 ov = lambda: sum(1 for x in calls if x.startswith("overpass:") and "out tags bb" in x)
 c.post("/api/search", json=body); n_ov = ov()
 again = c.post("/api/search", json=body).get_json()
 assert ov() == n_ov and len(again["results"]) == len(res)                                 # no new Overpass query
 assert all("line" not in x for x in again["results"])
-wb.overpass = boom; wb._search_cache.clear()
+wb.overpass = boom; kvclear()
 assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 502      # a failed search is reported...
 wb.overpass = fake_overpass
 assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 200      # ...and never cached
-wb.SEARCH_TTL = 0; wb._search_cache.clear()
+wb.SEARCH_TTL = 0; kvclear()
 c.post("/api/search", json=body)
 
 # --- detail on click: each source loads its own route, keeping the list's id
@@ -580,10 +587,10 @@ assert pj["kinds"]["food"]["icon"] == "☕" and pj["kinds"]["water"]["label"] ==
 n1 = pc(); assert c.get("/api/walks/%d/places" % nz_id).get_json() == pj and pc() == n1                # cached for an hour
 assert c.get("/api/walks/999999/places").status_code == 404
 assert c.get("/api/walks/%d/places" % rocky["osm_id"]).status_code == 200                           # a search result that was never opened
-wb._places_cache.clear(); wb.overpass = boom
+kvclear(); wb.overpass = boom
 e502 = c.get("/api/walks/%d/places" % nz_id)
 assert e502.status_code == 502 and "Nearby places unavailable" in e502.get_json()["error"]
-wb.overpass = fake_overpass; wb._places_cache.clear()
+wb.overpass = fake_overpass; kvclear()
 page = c.get("/").data
 assert b'id="info"' in page and b"renderPlaces" in page and b"openWalk" in page
 
@@ -732,21 +739,79 @@ assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT COUNT(*) FROM w
 c.get("/api/walks/%d/terrain" % rocky["osm_id"]); assert len(around_log) == 2
 assert c.get("/api/walks/999999/terrain").status_code == 404
 # OpenStreetMap or the elevation service down: still answers, says so, and does not remember the failure
-wb._terrain_cache.clear(); around_mode["down"] = True
+kvclear(); around_mode["down"] = True
 dj = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
 assert dj["runs"] == [{"cls": "unknown", "a": 0.0, "b": 1.0}] and any("Surface data unavailable" in n for n in dj["notes"]) and dj["difficulty"]["label"]
 around_mode["down"] = False
 dj2 = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
 n_around = len(around_log); assert dj2["notes"] == [] and dj2["runs"]
 c.get("/api/walks/%d/terrain" % rocky["osm_id"]); assert len(around_log) == n_around                      # a good answer is remembered
-wb._terrain_cache.clear(); wb._profile_mem.clear(); wb.requests.get = down
+kvclear(); kvclear(); wb.requests.get = down
 ej = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
 assert any("Elevation unavailable" in n for n in ej["notes"]) and ej["runs"] and ej["difficulty"]["label"]
-wb.requests.get = good_get; wb._terrain_cache.clear()
+wb.requests.get = good_get; kvclear()
 # replacing a walk drops its saved surface data
 assert c.post("/api/customise", json={"base_id": nz_id, "mode": "replace", "chain": base_chain[1:-1], "name": "Takapuna Beach Walkway"}).status_code == 200
 assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT terrain FROM walks WHERE osm_id=?", (nz_id,)).fetchone()[0] is None
 assert b'id="legend"' in c.get("/").data and b"paintTerrain" in c.get("/").data and b"showDifficulty" in c.get("/").data
+
+# --- The cache lives in the database, so it survives a restart and repeats are instant
+import time as _time
+def remote_calls(): return sum(1 for x in calls if x.startswith("overpass:")) + sum(1 for u, p_ in get_log if "arcgis" in u or "b5ADKIcWivL5vNaV" in u or "open-meteo" in u or "elevation" in u)
+def restart():                                   # what a redeploy does: the in-memory caches are gone, the database stays
+    with wb._cache_lock: wb._cache.clear()
+wb.SEARCH_TTL = 21600; kvclear(); restart()
+first = c.post("/api/search", json=dict(body, sources=["routes"])).get_json()
+r_open = first["results"][0]; n0 = remote_calls()
+assert c.post("/api/search", json=dict(body, sources=["routes"])).get_json()["results"] == first["results"] and remote_calls() == n0   # same search: nothing fetched
+restart()                                         # the server was restarted: the list from before can still be opened...
+d1 = c.post("/api/detail", json={"id": r_open["osm_id"]})
+assert d1.status_code == 200 and d1.get_json()["line"], d1.data
+n1 = remote_calls(); restart()                    # ...and, once opened, opening it again after another restart costs nothing
+assert c.post("/api/detail", json={"id": r_open["osm_id"]}).get_json()["line"] == d1.get_json()["line"] and remote_calls() == n1
+for path in ("profile", "terrain", "places"):
+    j1 = c.get("/api/walks/%d/%s" % (r_open["osm_id"], path)); assert j1.status_code == 200, (path, j1.data)
+    n2 = remote_calls(); restart()
+    assert c.get("/api/walks/%d/%s" % (r_open["osm_id"], path)).get_json() == j1.get_json() and remote_calls() == n2, path        # served from the database
+conn_ = wb.sqlite3.connect(os.environ["DB_PATH"])
+assert conn_.execute("SELECT COUNT(*) FROM kv WHERE k LIKE 'search:%'").fetchone()[0] >= 1 and conn_.execute("SELECT COUNT(*) FROM kv WHERE k LIKE 'light:%'").fetchone()[0] >= 1
+conn_.execute("UPDATE kv SET ts = ts - 100 * 86400"); conn_.commit(); conn_.close()                                                 # everything is now very old...
+n3 = remote_calls(); c.post("/api/search", json=dict(body, sources=["routes"])); assert remote_calls() > n3                          # ...so it is fetched again
+kvclear(); wb.SEARCH_TTL = 0
+# a failed search is never remembered
+wb.SEARCH_TTL = 21600; wb.overpass = boom
+assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 502
+wb.overpass = fake_overpass; assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 200
+kvclear(); wb.SEARCH_TTL = 0
+
+# --- Overpass: if the first server is slow, the second is asked too and the first answer wins
+class PResp:
+    def __init__(self, data, code=200): self._d, self.status_code = data, code
+    def json(self): return self._d
+plog = []
+def fake_op_post(url, **kw):
+    plog.append(url)
+    behave = op_mode[url.split("/")[2]]
+    if behave == "slow": _time.sleep(0.8); return PResp({"elements": [], "from": "slow"})
+    if behave == "down": raise wb.requests.ConnectionError("Failed to resolve (Temporary failure in name resolution)")
+    if behave == "busy": return PResp({}, 429)
+    return PResp({"elements": [], "from": url.split("/")[2]})
+saved_urls, saved_hedge, saved_post = wb.OVERPASS_URLS, wb.HEDGE_SECONDS, wb.requests.post
+wb.OVERPASS_URLS = ["https://one.example/api", "https://two.example/api"]; wb.HEDGE_SECONDS = 0.15; wb.requests.post = fake_op_post
+op_mode = {"one.example": "slow", "two.example": "fast"}
+t0_ = _time.time(); out = real_overpass("q"); took = _time.time() - t0_
+assert out["from"] == "two.example" and took < 0.6 and plog == ["https://one.example/api", "https://two.example/api"], (out, took, plog)   # did not wait for the slow one
+plog.clear(); op_mode = {"one.example": "fast", "two.example": "fast"}
+assert real_overpass("q")["from"] == "one.example" and plog == ["https://one.example/api"]                                      # a quick first server: no second request
+plog.clear(); op_mode = {"one.example": "down", "two.example": "fast"}
+assert real_overpass("q")["from"] == "two.example" and plog == ["https://one.example/api", "https://two.example/api"]           # a failed first server: the next at once
+plog.clear(); op_mode = {"one.example": "busy", "two.example": "down"}
+try: real_overpass("q"); assert False, "expected a failure"
+except RuntimeError as ex: assert "one.example: HTTP 429" in str(ex) and "DNS lookup failed" in str(ex), str(ex)
+wb.OVERPASS_URLS = []
+try: real_overpass("q"); assert False
+except RuntimeError as ex: assert "No Overpass server" in str(ex)
+wb.OVERPASS_URLS, wb.HEDGE_SECONDS, wb.requests.post = saved_urls, saved_hedge, saved_post
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
