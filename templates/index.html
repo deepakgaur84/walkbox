@@ -68,6 +68,13 @@
   #savedlg .btns { display:flex; gap:8px; justify-content:flex-end; margin-top:10px; } #savedlg .btns button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
   #savedlg .btns .go { background:var(--brand); color:#fff; border-color:var(--brand); font-weight:600; }
   @media (max-width:800px) { #editor { left:12px; top:56px; width:calc(100% - 24px); bottom:auto; max-height:46%; } }
+  #legend { position:absolute; left:50%; transform:translateX(-50%); bottom:152px; z-index:900; display:none; background:rgba(38,50,56,.92); color:#fff; border-radius:10px; padding:7px 14px; font-size:12px; font-weight:600; max-width:94%; text-align:center; }
+  #legend .lg { display:inline-block; margin:0 7px; white-space:nowrap; }
+  #legend .dot { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:5px; vertical-align:-2px; border:1px solid rgba(255,255,255,.75); }
+  .dbadge { display:inline-block; color:#fff; font-weight:700; border-radius:14px; padding:2px 10px; margin-right:6px; }
+  .d-easy { background:#2e7d32; } .d-moderate { background:#f9a825; color:#222; } .d-hard { background:#e65100; } .d-very-hard { background:#b71c1c; }
+  #info .why { margin:4px 0 6px; padding-left:16px; color:var(--mute); font-size:12px; }
+  .chip.d-easy { background:#2e7d32; color:#fff; } .chip.d-moderate { background:#f9a825; color:#222; } .chip.d-hard { background:#e65100; color:#fff; } .chip.d-very-hard { background:#b71c1c; color:#fff; }
   .arr { width:18px; height:18px; border-radius:50%; background:#fff; border:2px solid #1b5e20; color:#1b5e20; font-size:9px; line-height:14px; text-align:center; box-sizing:border-box; }
   .pin { width:20px; height:20px; border-radius:50%; border:3px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.6); box-sizing:border-box; }
   .pin.start { background:linear-gradient(90deg,#1b5e20 50%,#222 50%); }
@@ -158,6 +165,7 @@
   <div id="mapwrap">
     <div id="map"></div>
     <div id="livebar"></div>
+    <div id="legend"></div>
     <div id="elev"></div>
     <div id="info"></div>
     <button id="editbtn" title="Trim, reroute, draw or rename this walk, then save it to your box">✎ Customise</button>
@@ -448,6 +456,19 @@ function thinChain(chain, max) {              // keep at most max points, always
 }
 function ascentOf(elev) { let g = 0; for (let i = 1; i < elev.length; i++) { const d = elev[i] - elev[i - 1]; if (d > 1) g += d; } return g; }
 function routeKind(chain, totalM) { return totalM > 500 && havM(chain[0], chain[chain.length - 1]) < 150 ? 'Loop' : 'Point to point'; }
+function terrainSegments(chain, cum, runs, reversed) {   // the route cut into pieces by surface; the fractions are in the walk's original direction
+  const total = cum[cum.length - 1], out = [];
+  runs.forEach(r => {
+    const a = reversed ? 1 - r.b : r.a, b = reversed ? 1 - r.a : r.b;
+    const pts = sliceChain(chain, cum, a * total, b * total);
+    if (pts.length >= 2) out.push({cls: r.cls, pts});
+  });
+  return out;
+}
+function diffClass(label) { return 'd-' + String(label || '').toLowerCase().replace(/\s+/g, '-'); }
+function legendItems(classes) {                          // most common surface first; 'unknown' last
+  return Object.entries(classes).sort((a, b) => (a[0] === 'unknown') - (b[0] === 'unknown') || b[1].m - a[1].m).map(([k, v]) => ({key: k, label: v.label, colour: v.colour, pct: v.pct}));
+}
 // END NAV
 
 let routeLayer = null;
@@ -489,7 +510,7 @@ let sel = null;   // the walk currently shown in "navigation view"
 let ed = null;    // the walk being customised (see the editor below)
 function clearSelection() {
   if (ed) endEdit(false);
-  $('editbtn').style.display = 'none';
+  $('editbtn').style.display = 'none'; $('legend').style.display = 'none';
   const inf = $('info'); inf.style.display = 'none'; inf.textContent = ''; $('revbtn').style.display = 'none';
   if (!sel) return;
   if (sel.watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(sel.watchId);
@@ -518,8 +539,8 @@ function selectWalk(r) {
   const addR = l => { add(l); s.routeLayers.push(l); return l; };   // the styled route, hidden while editing
   const icon = (html, size) => L.divIcon({className: '', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2]});
   const opts = {lineCap: 'round', lineJoin: 'round', interactive: false};
-  const paths = r.line.map(c => addR(L.polyline(c, Object.assign({color: '#1b5e20', weight: 11, opacity: 1}, opts))));
-  r.line.forEach(c => addR(L.polyline(c, Object.assign({color: '#66bb6a', weight: 7, opacity: 1}, opts))));
+  const paths = r.line.map(c => addR(L.polyline(c, Object.assign({color: '#263238', weight: 11, opacity: 1}, opts))));
+  r.line.forEach((c, k) => { const f = addR(L.polyline(c, Object.assign({color: '#66bb6a', weight: 7, opacity: 1}, opts))); if (k === 0) s.mainFill = f; });
   const total = s.cum[s.cum.length - 1];
   s.arrows = addR(L.layerGroup());
   addR(L.marker(chain[0], {icon: icon('<div class="pin start"></div>', 20), interactive: false, keyboard: false}));
@@ -530,6 +551,7 @@ function selectWalk(r) {
   const rb = $('revbtn'); rb.style.display = 'block'; rb.className = r.reversed ? 'on' : ''; rb.textContent = r.reversed ? '⇄ Reversed: tap to restore' : '⇄ Swap start / end';
   loadProfile(s);
   loadInfo(s);
+  loadTerrain(s);
   startLive(s);
 }
 
@@ -696,11 +718,11 @@ function startEdit() {
   const r = sel.r, orig = sel.chain.map(p => p.slice());
   ed = {r, s: sel, orig, origCum: sel.cum, origChain: sel.chain, origProfile: sel.profile, wps: [], legs: [], hist: [], redo: [], tool: 'reshape',
         snap: ROUTING, layer: L.layerGroup().addTo(map), q: Promise.resolve(), busy: 0, notice: '', trim: null, profile: null, chain: orig, cum: sel.cum,
-        name: r.name, desc: r.description || '', diff: r.difficulty || '', rating: r.my_rating || 0, note: r.my_note || '', dialog: false};
+        name: r.name, desc: r.description || '', diff: r.difficulty || (r.est ? (r.est.label === 'Very hard' ? 'Hard' : r.est.label) : ''), rating: r.my_rating || 0, note: r.my_note || '', dialog: false};
   ed.wps = [{lat: orig[0][0], lon: orig[0][1], split: false}, {lat: orig[orig.length - 1][0], lon: orig[orig.length - 1][1], split: false}];
   ed.legs = [orig.map(p => p.slice())];
   sel.routeLayers.forEach(l => map.removeLayer(l));
-  ['info', 'revbtn', 'editbtn'].forEach(id => $(id).style.display = 'none');
+  ['info', 'revbtn', 'editbtn', 'legend'].forEach(id => $(id).style.display = 'none');
   buildEditor(); setTool('reshape');
 }
 function endEdit(restore) {
@@ -710,7 +732,7 @@ function endEdit(restore) {
   if (sel && sel === e.s) {
     sel.chain = e.origChain; sel.cum = e.origCum; sel.profile = e.origProfile;
     sel.routeLayers.forEach(l => l.addTo(map));
-    if (restore) { $('info').style.display = 'block'; $('revbtn').style.display = 'block'; $('editbtn').style.display = 'block'; if (sel.profile) { $('elev').style.display = 'block'; drawProfile(sel); } }
+    if (restore) { showLegend(sel); $('info').style.display = 'block'; $('revbtn').style.display = 'block'; $('editbtn').style.display = 'block'; if (sel.profile) { $('elev').style.display = 'block'; drawProfile(sel); } }
   }
 }
 function buildEditor() {
@@ -778,6 +800,52 @@ function edSave() {                              // ask at the moment of saving:
 map.on('click', e => { if (ed) edMapClick(e); });
 $('editbtn').onclick = startEdit;
 
+function addRoute(s, layer) { if (!ed) layer.addTo(map); s.layers.push(layer); s.routeLayers.push(layer); return layer; }
+function drop(s, layer) { map.removeLayer(layer); s.layers = s.layers.filter(l => l !== layer); s.routeLayers = s.routeLayers.filter(l => l !== layer); }
+function paintTerrain(s) {                       // colour the route by what it is made of, like the legend says
+  const j = s.terrain; if (!j || !j.runs || !j.runs.length) return;
+  if (s.mainFill) { drop(s, s.mainFill); s.mainFill = null; }
+  terrainSegments(s.chain, s.cum, j.runs, !!s.r.reversed).forEach(seg => {
+    const colour = (j.classes[seg.cls] || {colour: '#f2f2f2'}).colour;
+    addRoute(s, L.polyline(seg.pts, {color: colour, weight: 7, opacity: 1, lineCap: 'butt', lineJoin: 'round', interactive: false}));
+  });
+  showLegend(s);
+}
+function showLegend(s) {
+  const el = $('legend'); el.textContent = '';
+  if (!s || !s.terrain || ed) { el.style.display = 'none'; return; }
+  legendItems(s.terrain.classes).forEach(it => {
+    const span = document.createElement('span'); span.className = 'lg';
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = it.colour;
+    span.append(dot, it.label + (it.pct >= 1 ? ' ' + it.pct + '%' : '')); el.appendChild(span);
+  });
+  el.style.display = 'block';
+}
+function showDifficulty(s) {
+  const box = $('diffbox'); if (!box) return;
+  const d = s.terrain && s.terrain.difficulty; box.textContent = '';
+  if (!d) { box.textContent = 'Difficulty unavailable'; return; }
+  const top = document.createElement('div');
+  const badge = document.createElement('span'); badge.className = 'dbadge ' + diffClass(d.label); badge.textContent = d.label;
+  top.append(badge, d.score.toFixed(1) + ' / 10 (estimated)'); box.appendChild(top);
+  const ul = document.createElement('ul'); ul.className = 'why'; d.reasons.forEach(x => { const li = document.createElement('li'); li.textContent = x; ul.appendChild(li); }); box.appendChild(ul);
+  (s.terrain.notes || []).forEach(n => { const p = document.createElement('div'); p.className = 'sub'; p.textContent = n; box.appendChild(p); });
+}
+function updateEstChip(r) {                       // the estimated difficulty on the walk's card in the list
+  const row = document.querySelector('#w' + r.osm_id + ' .chiprow'); if (!row || !r.est) return;
+  const old = row.querySelector('.estchip'); if (old) old.remove();
+  const c = document.createElement('span'); c.className = 'chip estchip ' + diffClass(r.est.label); c.textContent = 'Est. ' + r.est.label + ' ' + r.est.score.toFixed(1) + '/10';
+  c.title = r.est.reasons.join(' · '); row.appendChild(c);
+}
+async function loadTerrain(s) {
+  try {
+    const resp = await fetch('/api/walks/' + s.r.osm_id + '/terrain'); const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(j.error || ('Failed (' + resp.status + ')'));
+    if (sel !== s) return;
+    s.terrain = j; s.r.est = j.difficulty; paintTerrain(s); showDifficulty(s); updateEstChip(s.r);
+  } catch (e) { if (sel === s) { const b = $('diffbox'); if (b) b.textContent = 'Difficulty unavailable: ' + e.message; } }
+}
+
 let infoOpen = window.innerWidth > 800;
 function dayLabel(d, i) { return i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : new Date(d + 'T12:00:00').toLocaleDateString(undefined, {weekday: 'short'}); }
 function renderWeather(box, w) {
@@ -836,10 +904,12 @@ function loadInfo(s) {
   const setOpen = o => { infoOpen = o; body.style.display = o ? '' : 'none'; arrow.textContent = o ? '▾' : '▸'; };
   head.onclick = () => setOpen(!infoOpen); setOpen(infoOpen);
   el.append(head, body);
+  const dbox = document.createElement('div'); dbox.id = 'diffbox'; dbox.className = 'sub'; dbox.textContent = 'Estimating difficulty…'; dbox.style.marginBottom = '6px';
   const wbox = document.createElement('div'); wbox.textContent = 'Loading weather…'; wbox.className = 'sub';
   const sec = document.createElement('div'); sec.className = 'sec'; sec.textContent = 'Along the route';
   const pbox = document.createElement('div'); pbox.textContent = 'Looking for cafés, water, toilets and rest spots…'; pbox.className = 'sub';
-  body.append(wbox, sec, pbox);
+  body.append(dbox, wbox, sec, pbox);
+  if (s.terrain) showDifficulty(s);
   const mid = pointAt(s.chain, s.cum, s.cum[s.cum.length - 1] / 2);
   fetch('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4)).then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Weather failed'); return j; })
     .then(w => { if (sel === s) { wbox.textContent = ''; wbox.className = ''; renderWeather(wbox, w); } })
@@ -1032,12 +1102,13 @@ function render(keep) {
     const m = document.createElement('div'); m.className = 'm';
     m.textContent = [r.distance_km != null ? (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km' : null, r.route_type, r.time_text, r.ascent_m ? ('↑ ' + Math.round(r.ascent_m) + ' m') : null, r.region || r.place].filter(Boolean).join(' · ');
     body.append(t, m);
-    const chips = document.createElement('div');
+    const chips = document.createElement('div'); chips.className = 'chiprow';
     const chip = (txt, cls) => { const c = document.createElement('span'); c.className = 'chip' + (cls ? ' ' + cls : ''); c.textContent = txt; chips.appendChild(c); };
     if (r.difficulty) chip(r.difficulty);
     chip(r.source_label);
     if (r.ref) chip('ref ' + r.ref);
     if (r.autoSwapped) chip('⇄ starts at ' + r.autoSwapped);
+    if (r.est) { chip('Est. ' + r.est.label + ' ' + r.est.score.toFixed(1) + '/10', 'estchip ' + diffClass(r.est.label)); chips.lastChild.title = r.est.reasons.join(' · '); }
     body.appendChild(chips);
     if (r.my_rating) chip('My rating: ' + '★'.repeat(r.my_rating));
     if (mode === 'box') {

@@ -33,6 +33,20 @@ the way round you are looking at.
 
 The route itself is fetched only when you **click a walk** (or when you add it to your box). After that the walk view opens, with its exact length.
 
+## Route surface and estimated difficulty
+
+The route in the walk view is coloured by **what it is made of**, with a legend above the elevation chart (for example Paved 41%, Sand 24%, Gravel, Rock,
+Steps, Boardwalk, Dirt, Grass). Surfaces come from OpenStreetMap: Walkbox looks up the mapped paths along your route and gives each stretch the surface of the
+nearest one (a footpath is preferred to a street beside it; an ordinary street with no surface tag counts as paved). Paths where nobody has recorded the surface
+are shown **white (unknown)**, which is common on bush tracks, so the colours are only as good as the map data. Colours follow the walk if you swap start and end.
+
+The **Weather & nearby** card also shows an **estimated difficulty** (Easy, Moderate, Hard or Very hard, with a score out of 10) and the reasons behind it,
+and the walk's card in the list gets an "Est. …" tag. The score adds up distance (up to 3 points, 12 km or more), climbing (up to 3 points, 300 m or more),
+steepness (up to 2.5 points for 30% or steeper stretches), rough surfaces such as rock, steps and sand (up to 2 points) and OpenStreetMap's hiking-grade
+tag (up to 3 points). If the source gives an official grade (DOC or the council tracks), the walk is never rated easier than that grade.
+Under 3.5 is Easy, under 6 Moderate, under 8 Hard. It is an estimate from map and elevation data, not a substitute for local knowledge: check conditions
+and the official track information before you go. The editor pre-fills the difficulty from this estimate. Surface and difficulty are saved with walks in your box.
+
 ## Customising a walk
 
 Open a walk and press **✎ Customise** (top right of the map). The route is shown in green with the original dashed in grey, and a panel on the left

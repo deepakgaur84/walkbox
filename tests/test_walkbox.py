@@ -61,6 +61,23 @@ def overpass_list():
     return {"elements": els}
 
 
+around_log = []
+around_mode = {"down": False}
+
+
+def _way(wid, tags, *pts):
+    return {"type": "way", "id": wid, "tags": dict({"highway": "footway"}, **tags), "geometry": [{"lat": a, "lon": b} for a, b in pts]}
+
+
+# ways along the Takapuna walkway (lon 174.77, lat -36.790 -> -36.802): sand, boardwalk, asphalt; plus a street beside it
+AROUND_WAYS = [
+    _way(901, {"surface": "sand"}, (-36.790, 174.77), (-36.794, 174.77)),
+    _way(902, {"bridge": "boardwalk"}, (-36.794, 174.77), (-36.798, 174.77)),
+    _way(903, {"surface": "asphalt"}, (-36.798, 174.77), (-36.802, 174.77)),
+    _way(904, {"highway": "residential"}, (-36.789, 174.7709), (-36.803, 174.7709)),
+]
+
+
 def fake_overpass(q):
     calls.append("overpass:" + q)
     if "out tags bb" in q:
@@ -73,6 +90,11 @@ def fake_overpass(q):
         name = q.split('["name"="')[1].split('"]')[0]
         return {"elements": [{"type": "way", "id": wid, "tags": {"name": n, "highway": "footway"}, "geometry": g}
                              for wid, n, g in WAYS if n == name]}
+    if "(around:" in q:
+        around_log.append(q)
+        if around_mode["down"]:
+            raise RuntimeError("overpass-api.de: timed out")
+        return {"elements": AROUND_WAYS}
     if "out tags center" in q:
         return PLACES_OVERPASS
     raise AssertionError("unexpected overpass query: " + q[:80])
@@ -651,6 +673,80 @@ wb.requests.post = real_post
 
 page = c.get("/").data
 assert b'id="editbtn"' in page and b"startEdit" in page and b"edSave" in page and b"nearestLeg" in page
+
+# --- Surface of the route and estimated difficulty
+sc = wb.surface_class
+assert sc({"highway": "footway", "surface": "sand"}) == "sand" and sc({"highway": "path", "surface": "fine_gravel"}) == "gravel"
+assert sc({"highway": "steps"}) == "steps" and sc({"highway": "footway", "bridge": "boardwalk"}) == "wood"
+assert sc({"highway": "residential"}) == "paved" and sc({"highway": "path"}) == "unknown" and sc({"highway": "track", "surface": "ground"}) == "dirt"
+assert sc({"highway": "footway", "surface": "asphalt;concrete"}) == "paved" and sc({"highway": "path", "surface": "bare_rock"}) == "rock"
+# matching: a street 9 m beside a mapped footpath must not win
+straight = [(-36.790, 174.77), (-36.802, 174.77)]
+runs, totals, extra = wb.match_surfaces(straight, [dict(tags=w["tags"], pts=[(p["lat"], p["lon"]) for p in w["geometry"]]) for w in AROUND_WAYS])
+assert [r["cls"] for r in runs] == ["sand", "wood", "paved"], runs
+assert runs[0]["a"] == 0.0 and runs[-1]["b"] == 1.0 and all(abs(a["b"] - b["a"]) < 1e-9 for a, b in zip(runs, runs[1:]))
+assert abs(runs[0]["b"] - 1 / 3) < 0.03 and abs(runs[1]["b"] - 2 / 3) < 0.03
+assert abs(sum(totals.values()) - wb.chain_length_m(straight)) < 5
+none_runs, none_tot, _ = wb.match_surfaces(straight, [])
+assert none_runs == [{"cls": "unknown", "a": 0.0, "b": 1.0}]                                             # nothing mapped: all unknown
+far = [dict(tags={"highway": "footway", "surface": "sand"}, pts=[(-36.790, 174.7712), (-36.802, 174.7712)])]   # 110 m away: too far
+assert wb.match_surfaces(straight, far)[0][0]["cls"] == "unknown"
+tiny = [dict(tags={"highway": "footway", "surface": "sand"}, pts=[(-36.790, 174.77), (-36.796, 174.77)]),      # a 5 m blip of steps is absorbed
+        dict(tags={"highway": "steps"}, pts=[(-36.79300, 174.77), (-36.79304, 174.77)])]
+assert [r["cls"] for r in wb.match_surfaces(straight, tiny)[0]][:1] == ["sand"] and "steps" not in [r["cls"] for r in wb.match_surfaces(straight, tiny)[0]]
+# the steepest stretch
+assert round(wb.max_grade_pct({"dist_km": [0, .05, .1, .2, .3], "elev_m": [0, 0, 0, 10, 10]}), 1) == 10.0
+assert wb.max_grade_pct({"dist_km": [0, 5], "elev_m": [0, 3000]}) == 45.0 and wb.max_grade_pct({"dist_km": [0, .05], "elev_m": [0, 9]}) == 0.0
+# difficulty scoring across typical walks
+dr = wb.difficulty_rating
+flat = dr(2.6, 2, 1, {"paved": 2600}, 2600)
+assert flat["label"] == "Easy" and flat["score"] < 1.5, flat
+coast = dr(8.4, 49, 6, {"paved": 5000, "sand": 1500, "unknown": 1900}, 8400)
+assert coast["label"] == "Easy" and 2 < coast["score"] < 3.5, coast
+longer = dr(15.0, 257, 9, {"paved": 9000, "sand": 3000, "unknown": 3000}, 15000)
+assert longer["label"] == "Moderate", longer
+mountain = dr(10.0, 800, 28, {"rock": 4000, "dirt": 3000, "unknown": 3000}, 10000, sac="mountain_hiking")
+assert mountain["label"] in ("Hard", "Very hard") and mountain["score"] > 7, mountain
+assert dr(1.0, 5, 0, {"paved": 1000}, 1000, source_grade="Challenging tramping track")["label"] in ("Hard", "Very hard")   # an official grade sets a floor
+assert dr(1.0, 5, 0, {"paved": 1000}, 1000, source_grade="Short walk")["label"] == "Easy"
+assert any("official grade" in x for x in dr(1.0, 5, 0, {}, 1000, source_grade="Walking track")["reasons"])
+assert any("surface:" in x and "paved" in x for x in coast["reasons"]) and any("climbing" in x for x in coast["reasons"])
+assert all(0 <= x["score"] <= 10 for x in (flat, coast, longer, mountain)) and dr(100, 5000, 45, {"rock": 1e5}, 1e5, sac="difficult_alpine_hiking")["score"] == 10.0
+
+# the endpoint: a walk in the box
+around_log.clear(); wb._rate_calls.clear()
+tr = c.get("/api/walks/%d/terrain" % nz_id)
+tj = tr.get_json()
+assert tr.status_code == 200, tj
+assert [r["cls"] for r in tj["runs"]] == ["sand", "wood", "paved"] and tj["difficulty"]["label"] in ("Easy", "Moderate", "Hard", "Very hard")
+assert tj["classes"]["sand"]["label"] == "Sand" and tj["classes"]["wood"]["label"] == "Boardwalk" and tj["classes"]["paved"]["colour"].startswith("#")
+assert abs(sum(v["pct"] for v in tj["classes"].values()) - 100) <= 2 and tj["total_m"] > 1000 and tj["notes"] == []
+assert tj["difficulty"]["reasons"] and "OpenStreetMap" in tj["attribution"] and len(around_log) == 1
+assert "(around:" in around_log[0] and "restrict" not in around_log[0] and '"highway"!~"^(motorway' in around_log[0]       # no motorways, one corridor query
+assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT terrain FROM walks WHERE osm_id=?", (nz_id,)).fetchone()[0]    # saved with the walk
+assert c.get("/api/walks/%d/terrain" % nz_id).get_json() == tj and len(around_log) == 1                                  # no second lookup
+# a search result that is not in the box is cached in memory only
+tj2 = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
+assert "runs" in tj2 and len(around_log) == 2
+assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT COUNT(*) FROM walks WHERE osm_id=?", (rocky["osm_id"],)).fetchone()[0] == 0
+c.get("/api/walks/%d/terrain" % rocky["osm_id"]); assert len(around_log) == 2
+assert c.get("/api/walks/999999/terrain").status_code == 404
+# OpenStreetMap or the elevation service down: still answers, says so, and does not remember the failure
+wb._terrain_cache.clear(); around_mode["down"] = True
+dj = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
+assert dj["runs"] == [{"cls": "unknown", "a": 0.0, "b": 1.0}] and any("Surface data unavailable" in n for n in dj["notes"]) and dj["difficulty"]["label"]
+around_mode["down"] = False
+dj2 = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
+n_around = len(around_log); assert dj2["notes"] == [] and dj2["runs"]
+c.get("/api/walks/%d/terrain" % rocky["osm_id"]); assert len(around_log) == n_around                      # a good answer is remembered
+wb._terrain_cache.clear(); wb._profile_mem.clear(); wb.requests.get = down
+ej = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
+assert any("Elevation unavailable" in n for n in ej["notes"]) and ej["runs"] and ej["difficulty"]["label"]
+wb.requests.get = good_get; wb._terrain_cache.clear()
+# replacing a walk drops its saved surface data
+assert c.post("/api/customise", json={"base_id": nz_id, "mode": "replace", "chain": base_chain[1:-1], "name": "Takapuna Beach Walkway"}).status_code == 200
+assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT terrain FROM walks WHERE osm_id=?", (nz_id,)).fetchone()[0] is None
+assert b'id="legend"' in c.get("/").data and b"paintTerrain" in c.get("/").data and b"showDifficulty" in c.get("/").data
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]

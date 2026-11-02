@@ -100,6 +100,8 @@ _weather_cache = {}
 _search_cache = {}
 SEARCH_TTL = int(os.environ.get("SEARCH_CACHE_SECONDS", "900"))
 _places_cache = {}
+_terrain_cache = {}
+_profile_mem = {}
 _rate_calls = {}
 
 
@@ -127,7 +129,7 @@ CREATE INDEX IF NOT EXISTS walks_name ON walks(name);
 EXTRA_COLUMNS = {
     "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
     "link": "TEXT", "region": "TEXT", "time_text": "TEXT",
-    "my_rating": "INTEGER", "my_note": "TEXT", "profile": "TEXT",
+    "my_rating": "INTEGER", "my_note": "TEXT", "profile": "TEXT", "terrain": "TEXT",
 }
 
 
@@ -1482,6 +1484,10 @@ def api_profile(osm_id):
         prof = build_profile(chain)
     except RuntimeError as ex:
         return jsonify(error="Elevation profile unavailable: %s" % ex), 502
+    if not in_box:
+        _profile_mem[(osm_id, len(chain))] = prof
+        if len(_profile_mem) > 200:
+            _profile_mem.clear()
     if in_box:
         conn = db()
         conn.execute("UPDATE walks SET profile=? WHERE osm_id=?", (json.dumps(prof), osm_id))
@@ -1507,6 +1513,250 @@ def api_note(osm_id):
     if not cur.rowcount:
         abort(404)
     return jsonify(ok=True, my_rating=rating, my_note=note)
+
+
+# --------------------------------------------------------------------------
+# Surface of the route (from OpenStreetMap) and an estimated difficulty rating
+# --------------------------------------------------------------------------
+SURFACES = {   # class: (label, colour)
+    "paved": ("Paved", "#37474f"), "gravel": ("Gravel", "#a1887f"), "dirt": ("Dirt", "#8d6e63"),
+    "grass": ("Grass", "#7cb342"), "sand": ("Sand", "#e6b85c"), "rock": ("Rock", "#8a8f94"),
+    "wood": ("Boardwalk", "#c58b5a"), "steps": ("Steps", "#d05a5a"), "unknown": ("Unknown", "#f2f2f2"),
+}
+SURFACE_OF = {}
+for _cls, _vals in {
+    "paved": "asphalt paved concrete concrete:plates concrete:lanes paving_stones sett cobblestone unhewn_cobblestone bricks brick metal tartan rubber acrylic",
+    "gravel": "gravel fine_gravel compacted pebblestone shingle crushed_limestone woodchips",
+    "dirt": "dirt ground earth mud soil unpaved clay",
+    "grass": "grass grass_paver",
+    "sand": "sand",
+    "rock": "rock bare_rock stone scree",
+    "wood": "wood boardwalk planks",
+}.items():
+    for _v in _vals.split():
+        SURFACE_OF[_v] = _cls
+FOOT_HIGHWAYS = {"footway", "path", "steps", "pedestrian", "track", "bridleway", "cycleway"}
+PAVED_ROADS = {"residential", "service", "unclassified", "living_street", "tertiary", "secondary", "primary", "road", "tertiary_link"}
+SAC_POINTS = {"hiking": 0.0, "mountain_hiking": 1.0, "demanding_mountain_hiking": 2.0, "alpine_hiking": 2.5,
+              "demanding_alpine_hiking": 3.0, "difficult_alpine_hiking": 3.0}
+ROUGHNESS = {"rock": 1.0, "steps": 1.0, "sand": 0.6, "dirt": 0.3, "grass": 0.3, "gravel": 0.15, "wood": 0.0, "paved": 0.0, "unknown": 0.0}
+
+
+def surface_class(tags):
+    hw = tags.get("highway")
+    if hw == "steps":
+        return "steps"
+    surf = (tags.get("surface") or "").split(";")[0].strip().lower()
+    if tags.get("bridge") == "boardwalk" and not surf:
+        return "wood"
+    if surf in SURFACE_OF:
+        return SURFACE_OF[surf]
+    if surf in ("unpaved", "ground"):
+        return "dirt"
+    if not surf and hw in PAVED_ROADS:
+        return "paved"                                   # ordinary streets with no surface tag are paved
+    return "unknown"
+
+
+def fetch_surface_ways(chain):
+    """OSM ways along a route: their tags and geometry."""
+    ch = simplify(chain, 220)
+    total_m = chain_length_m(chain)
+    spacing = total_m / max(1, len(ch) - 1)
+    radius = int(min(60, max(25, spacing * 0.45)))
+    coords = ",".join("%.5f,%.5f" % (p[0], p[1]) for p in ch)
+    q = ('[out:json][timeout:25];way(around:%d,%s)["highway"]'
+         '["highway"!~"^(motorway|motorway_link|trunk|trunk_link|proposed|construction|raceway|bus_guideway)$"];'
+         'out tags geom 4000;' % (radius, coords))
+    ways = []
+    for el in overpass(q).get("elements", []):
+        if el.get("type") == "way" and el.get("geometry"):
+            ways.append({"tags": el.get("tags", {}), "pts": [(p["lat"], p["lon"]) for p in el["geometry"]]})
+    return ways, radius
+
+
+def match_surfaces(chain, ways, max_off=22.0, step_m=8.0):
+    """Give every stretch of the route a surface class by finding the nearest mapped way. Returns runs as fractions of the route."""
+    cum = [0.0]
+    for i in range(1, len(chain)):
+        cum.append(cum[-1] + haversine_m(chain[i - 1], chain[i]))
+    total = cum[-1]
+    if total <= 0:
+        return [], {}, {"sac": None}
+    lat0, lon0 = chain[0]
+    kx, ky = math.cos(math.radians(lat0)) * 111320.0, 110540.0
+    proj = lambda p: ((p[1] - lon0) * kx, (p[0] - lat0) * ky)
+    cell = 40.0
+    grid, meta = {}, []
+    for wi, w in enumerate(ways):
+        cls = surface_class(w["tags"])
+        foot = w["tags"].get("highway") in FOOT_HIGHWAYS
+        meta.append((cls, foot, w["tags"].get("sac_scale")))
+        xy = [proj(p) for p in w["pts"]]
+        for a, b in zip(xy, xy[1:]):
+            for cx in range(int(min(a[0], b[0]) // cell), int(max(a[0], b[0]) // cell) + 1):
+                for cy in range(int(min(a[1], b[1]) // cell), int(max(a[1], b[1]) // cell) + 1):
+                    grid.setdefault((cx, cy), []).append((wi, a, b))
+    n = max(2, int(total / step_m))
+    samples, j = [], 0
+    for k in range(n):
+        d = total * k / (n - 1)
+        while j < len(cum) - 2 and cum[j + 1] < d:
+            j += 1
+        seg = (cum[j + 1] - cum[j]) or 1.0
+        t = min(1.0, max(0.0, (d - cum[j]) / seg))
+        samples.append(proj((chain[j][0] + t * (chain[j + 1][0] - chain[j][0]), chain[j][1] + t * (chain[j + 1][1] - chain[j][1]))))
+    classes, sacs = [], []
+    for x, y in samples:
+        best, best_i = None, None
+        for cx in range(int(x // cell) - 1, int(x // cell) + 2):
+            for cy in range(int(y // cell) - 1, int(y // cell) + 2):
+                for wi, a, b in grid.get((cx, cy), ()):
+                    dx, dy = b[0] - a[0], b[1] - a[1]
+                    l2 = dx * dx + dy * dy
+                    t = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)) if l2 else 0.0
+                    dist = math.hypot(a[0] + t * dx - x, a[1] + t * dy - y)
+                    score = dist + (0.0 if meta[wi][1] else 6.0)      # a footpath beats a road beside it
+                    if dist <= max_off and (best is None or score < best):
+                        best, best_i = score, wi
+        classes.append(meta[best_i][0] if best_i is not None else "unknown")
+        sacs.append(meta[best_i][2] if best_i is not None else None)
+    # runs; very short blips are absorbed by their neighbours
+    runs = []
+    for k, c in enumerate(classes):
+        if runs and runs[-1][0] == c:
+            runs[-1][2] = k + 1
+        else:
+            runs.append([c, k, k + 1])
+    min_len = max(2, int(15.0 / step_m))
+    merged = []
+    for r in runs:
+        if merged and (r[2] - r[1] < min_len):
+            merged[-1][2] = r[2]
+        else:
+            merged.append(r)
+    out = []
+    for c, a, b in merged:
+        if out and out[-1][0] == c:
+            out[-1][2] = b
+        else:
+            out.append([c, a, b])
+    runs_f = [{"cls": c, "a": round(a / n, 4), "b": round(min(1.0, b / n), 4)} for c, a, b in out]
+    if runs_f:
+        runs_f[0]["a"], runs_f[-1]["b"] = 0.0, 1.0
+    totals = {}
+    for r in runs_f:
+        totals[r["cls"]] = totals.get(r["cls"], 0.0) + (r["b"] - r["a"]) * total
+    best_sac = max((x for x in sacs if x in SAC_POINTS), key=lambda x: SAC_POINTS[x], default=None)
+    return runs_f, totals, {"sac": best_sac}
+
+
+def max_grade_pct(profile):
+    """Steepest stretch of about 100 m or more, in percent (the elevation data is coarse, so this is approximate)."""
+    d, e = profile["dist_km"], profile["elev_m"]
+    best = 0.0
+    for i in range(len(d)):
+        for j in range(i + 1, len(d)):
+            run = (d[j] - d[i]) * 1000.0
+            if run >= 100.0:
+                best = max(best, abs(e[j] - e[i]) / run * 100.0)
+                break
+    return min(best, 45.0)
+
+
+GRADE_WORDS = [("easiest", 1.0), ("path", 1.0), ("easy", 1.5), ("short walk", 1.5), ("walking track", 3.0),
+               ("intermediate", 4.5), ("moderate", 4.5), ("tramping track", 5.5), ("advanced", 6.5), ("hard", 6.5),
+               ("challenging", 8.0), ("route", 8.0), ("expert", 8.5), ("extreme", 9.0)]
+
+
+def difficulty_rating(km, ascent_m, grade_pct, totals, total_m, sac=None, source_grade=None):
+    """A 0-10 estimate from distance, climbing, steepness, rough surfaces and any official grade."""
+    reasons = []
+    dist_pts = min(3.0, km / 4.0)
+    climb_pts = min(3.0, (ascent_m or 0) / 100.0)
+    steep_pts = 2.5 if grade_pct >= 30 else 1.5 if grade_pct >= 20 else 0.5 if grade_pct >= 12 else 0.0
+    rough = sum(ROUGHNESS.get(c, 0.0) * m for c, m in totals.items()) / total_m if total_m else 0.0
+    rough_pts = min(2.0, rough * 3.0)
+    sac_pts = SAC_POINTS.get(sac, 0.0)
+    score = dist_pts + climb_pts + steep_pts + rough_pts + sac_pts
+    reasons.append("%.1f km long" % km)
+    reasons.append("%d m of climbing%s" % (round(ascent_m or 0), (", steepest about %d%%" % round(grade_pct)) if grade_pct >= 8 else ""))
+    known = {c: m for c, m in totals.items() if c != "unknown"}
+    if known and total_m and sum(known.values()) / total_m > 0.3:
+        top = sorted(known.items(), key=lambda kv: -kv[1])[:2]
+        reasons.append("surface: " + ", ".join("%s %d%%" % (SURFACES[c][0].lower(), round(100 * m / total_m)) for c, m in top))
+    if sac and sac_pts:
+        reasons.append("marked as %s in OpenStreetMap" % sac.replace("_", " "))
+    if source_grade:
+        floor = max([v for w, v in GRADE_WORDS if w in source_grade.lower()] or [0.0])
+        if floor:
+            reasons.append("official grade: %s" % source_grade)
+            score = max(score, floor)
+    score = round(min(10.0, score), 1)
+    label = "Easy" if score < 3.5 else "Moderate" if score < 6.0 else "Hard" if score < 8.0 else "Very hard"
+    return {"label": label, "score": score, "reasons": reasons, "max_grade_pct": round(grade_pct, 1), "ascent_m": round(ascent_m or 0)}
+
+
+def build_terrain(chain, source_grade, known_ascent=None, cached_profile=None):
+    notes = []
+    total_m = chain_length_m(chain)
+    try:
+        ways, _ = fetch_surface_ways(chain)
+        runs, totals, extra = match_surfaces(chain, ways)
+    except RuntimeError as ex:
+        ways, runs, totals, extra = [], [{"cls": "unknown", "a": 0.0, "b": 1.0}], {"unknown": total_m}, {"sac": None}
+        notes.append("Surface data unavailable: %s" % ex)
+    prof = cached_profile
+    if prof is None:
+        try:
+            prof = build_profile(simplify(chain, 1500))
+        except RuntimeError as ex:
+            notes.append("Elevation unavailable: %s" % ex)
+    if prof:
+        asc = ascentOf_py(prof["elev_m"])
+        grade = max_grade_pct(prof)
+    else:
+        asc, grade = (known_ascent or 0), 0.0
+    diff = difficulty_rating(total_m / 1000.0, asc, grade, totals, total_m, extra["sac"], source_grade)
+    classes = {c: {"label": SURFACES[c][0], "colour": SURFACES[c][1], "m": round(m), "pct": round(100.0 * m / total_m) if total_m else 0}
+               for c, m in totals.items()}
+    return {"runs": runs, "classes": classes, "total_m": round(total_m), "difficulty": diff, "notes": notes,
+            "attribution": "Surfaces from OpenStreetMap (ODbL). Where a path is not tagged the colour is white (unknown)."}
+
+
+def ascentOf_py(elev):
+    return sum(d for d in (b - a for a, b in zip(elev, elev[1:])) if d > 1.0)
+
+
+@app.get("/api/walks/<int:osm_id>/terrain")
+def api_terrain(osm_id):
+    row = db().execute("SELECT terrain, profile, difficulty, geom FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
+    if row and row["terrain"]:
+        return jsonify(json.loads(row["terrain"]))
+    try:
+        chain, in_box = main_chain(osm_id)
+    except RuntimeError as ex:
+        return jsonify(error=str(ex)), 502
+    key = (osm_id, len(chain))
+    hit = _terrain_cache.get(key)
+    if hit and not in_box:
+        return jsonify(hit)
+    if not rate_ok("terrain", 20):
+        return jsonify(error="Too many lookups just now. Try again in a minute."), 429
+    with _cache_lock:
+        cached_wk = _cache.get(osm_id) or {}
+    grade = (row["difficulty"] if row else cached_wk.get("difficulty"))
+    prof = json.loads(row["profile"]) if row and row["profile"] else _profile_mem.get(key)
+    res = build_terrain(chain, grade, cached_profile=prof)
+    if in_box and not res["notes"]:
+        conn = db()
+        conn.execute("UPDATE walks SET terrain=? WHERE osm_id=?", (json.dumps(res), osm_id))
+        conn.commit()
+    elif not in_box and not res["notes"]:
+        _terrain_cache[key] = res
+        if len(_terrain_cache) > 200:
+            _terrain_cache.clear()
+    return jsonify(res)
 
 
 # --------------------------------------------------------------------------
@@ -1586,7 +1836,7 @@ def api_customise():
         tags["base_source"] = base_source
         conn.execute(
             "UPDATE walks SET name=?, description=?, difficulty=?, distance_km=?, lat=?, lon=?, geom=?, tags=?,"
-            " route_type=?, ascent_m=?, profile=NULL, time_text=NULL, my_rating=?, my_note=? WHERE osm_id=?",
+            " route_type=?, ascent_m=?, profile=NULL, terrain=NULL, time_text=NULL, my_rating=?, my_note=? WHERE osm_id=?",
             (name, desc, diff, km, lat, lon, json.dumps([chain]), json.dumps(tags), rtype, ascent, rating, note, base_id))
         wid = base_id
     else:
