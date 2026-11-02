@@ -510,9 +510,13 @@ function legendItems(classes) {                          // most common surface 
 // END NAV
 
 const memo = new Map();                     // answers already fetched in this session, by address
-async function cachedGet(url) {
+async function cachedGet(url, seconds) {
   if (memo.has(url)) return memo.get(url);
-  const resp = await fetch(url); const j = await resp.json().catch(() => ({}));
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), (seconds || 75) * 1000);
+  let resp, j;
+  try { resp = await fetch(url, {signal: ctl.signal}); j = await resp.json().catch(() => ({})); }
+  catch (e) { throw new Error(e.name === 'AbortError' ? 'This is taking too long (the map server is busy). Try again in a minute.' : e.message); }
+  finally { clearTimeout(timer); }
   if (!resp.ok) throw new Error(j.error || ('Request failed (' + resp.status + ')'));
   memo.set(url, j); return j;
 }
@@ -875,6 +879,7 @@ function showDifficulty(s) {
   top.append(badge, d.score.toFixed(1) + ' / 10 (estimated)'); box.appendChild(top);
   const ul = document.createElement('ul'); ul.className = 'why'; d.reasons.forEach(x => { const li = document.createElement('li'); li.textContent = x; ul.appendChild(li); }); box.appendChild(ul);
   (s.terrain.notes || []).forEach(n => { const p = document.createElement('div'); p.className = 'sub'; p.textContent = n; box.appendChild(p); });
+  if (s.terrain.partial) { const p = document.createElement('div'); p.className = 'sub'; p.textContent = 'Looking up the surface of the path to colour the route and refine this…'; box.appendChild(p); }
 }
 function updateEstChip(r) {                       // the estimated difficulty on the walk's card in the list
   const row = document.querySelector('#w' + r.osm_id + ' .chiprow'); if (!row || !r.est) return;
@@ -883,11 +888,21 @@ function updateEstChip(r) {                       // the estimated difficulty on
   c.title = r.est.reasons.join(' · '); row.appendChild(c);
 }
 async function loadTerrain(s) {
+  const id = s.r.osm_id; let full = false;
+  cachedGet('/api/walks/' + id + '/terrain?quick=1', 30).then(j => {            // difficulty from distance and climbing: quick
+    if (full || sel !== s) return;
+    s.terrain = j; s.r.est = j.difficulty; showDifficulty(s); updateEstChip(s.r);
+  }).catch(() => {});
   try {
-    const j = await cachedGet('/api/walks/' + s.r.osm_id + '/terrain');
+    const j = await cachedGet('/api/walks/' + id + '/terrain');                  // then the surfaces: can be slow
     if (sel !== s) return;
-    s.terrain = j; s.r.est = j.difficulty; paintTerrain(s); showDifficulty(s); updateEstChip(s.r);
-  } catch (e) { if (sel === s) { const b = $('diffbox'); if (b) b.textContent = 'Difficulty unavailable: ' + e.message; } }
+    full = true; s.terrain = j; s.r.est = j.difficulty; paintTerrain(s); showDifficulty(s); updateEstChip(s.r);
+  } catch (e) {
+    if (sel !== s) return;
+    const note = document.createElement('div'); note.className = 'sub'; note.style.marginTop = '2px';
+    note.textContent = 'Surface colours unavailable: ' + e.message;
+    const box = $('diffbox'); if (box) { if (!s.terrain) box.textContent = 'Difficulty unavailable: ' + e.message; else box.appendChild(note); }
+  }
 }
 
 let infoOpen = window.innerWidth > 800;

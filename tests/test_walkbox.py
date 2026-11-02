@@ -78,7 +78,7 @@ AROUND_WAYS = [
 ]
 
 
-def fake_overpass(q):
+def fake_overpass(q, lane=None):
     calls.append("overpass:" + q)
     if "out tags bb" in q:
         return overpass_list()
@@ -260,7 +260,7 @@ assert c.post("/api/search", json={"south": 0, "west": 0, "north": 5, "east": 5}
 assert c.post("/api/search", json={}).status_code == 400
 
 # one source failing does not hide the others
-def boom(q):
+def boom(q, lane=None):
     raise RuntimeError("overpass-api.de: timed out")
 wb.overpass = boom
 j = c.post("/api/search", json=body).get_json()
@@ -825,7 +825,58 @@ except RuntimeError as ex: assert "one.example: HTTP 429" in str(ex) and "DNS lo
 wb.OVERPASS_URLS = []
 try: real_overpass("q"); assert False
 except RuntimeError as ex: assert "No Overpass server" in str(ex)
+# a server that ran out of time answers 200 with an empty list and a remark: that is a failure, not "no walks"
+plog.clear(); wb.OVERPASS_URLS = ["https://one.example/api", "https://two.example/api"]
+def busy_post(url, **kw):
+    plog.append(url)
+    if "one" in url: return PResp({"version": 0.6, "elements": [], "remark": "runtime error: Query timed out in \"query\" at line 3 after 26 seconds."})
+    return PResp({"elements": [{"type": "node", "id": 1}], "from": "two.example"})
+wb.requests.post = busy_post
+assert real_overpass("q")["from"] == "two.example" and plog == ["https://one.example/api", "https://two.example/api"]        # moved on to the next server
+wb.OVERPASS_URLS = ["https://one.example/api"]
+try: real_overpass("q"); assert False, "an out-of-time answer must not be taken as 'nothing found'"
+except RuntimeError as ex: assert "too busy" in str(ex)
+# a slow big search must not hold up the lookups for a walk you have opened (they use their own lane)
+wb.OVERPASS_URLS = ["https://one.example/api"]; wb.HEDGE_SECONDS = 5
+import threading as _th
+def lane_post(url, **kw):
+    q = kw["data"]["data"]
+    if "SLOWBULK" in q: _time.sleep(1.0)
+    return PResp({"elements": [], "q": q[:8]})
+wb.requests.post = lane_post
+bulk_done = []
+th_ = _th.Thread(target=lambda: (real_overpass("SLOWBULK", lane="bulk"), bulk_done.append(_time.time()))); t_start = _time.time(); th_.start(); _time.sleep(0.15)
+t1_ = _time.time(); real_overpass("quick lookup", lane="fast"); fast_took = _time.time() - t1_
+th_.join()
+assert fast_took < 0.5 and bulk_done[0] - t_start >= 0.9, (fast_took, bulk_done)                                                   # the lookup was not queued behind it
+t2_ = _time.time(); th2 = _th.Thread(target=lambda: real_overpass("SLOWBULK", lane="bulk")); th2.start(); _time.sleep(0.15)
+real_overpass("another search", lane="bulk"); assert _time.time() - t2_ >= 0.95; th2.join()                                         # but two searches still take turns
 wb.OVERPASS_URLS, wb.HEDGE_SECONDS, wb.requests.post = saved_urls, saved_hedge, saved_post
+
+# --- Difficulty arrives first (no OpenStreetMap needed); the surfaces follow
+wb._rate_calls.clear(); kvclear()
+around_log.clear()
+wb.SEARCH_TTL = 0; c.post("/api/search", json=dict(body, sources=["paths"]))             # a fresh search so the walk can be opened again
+q1 = c.get("/api/walks/%d/terrain?quick=1" % rocky["osm_id"]).get_json()
+assert q1["partial"] is True and q1["runs"] == [] and q1["difficulty"]["label"] in ("Easy", "Moderate", "Hard", "Very hard") and around_log == [], q1
+assert not any("Surface data unavailable" in n for n in q1["notes"]) and q1["difficulty"]["reasons"]
+full = c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
+assert full["partial"] is False and full["runs"] and len(around_log) == 1                                                            # the full answer fetched the surfaces
+assert c.get("/api/walks/%d/terrain?quick=1" % rocky["osm_id"]).get_json() == full                                                  # once known, "quick" is the full answer
+wb._rate_calls.clear()
+for _ in range(30): assert c.get("/api/walks/%d/terrain?quick=1" % nz_id).status_code == 200                                         # the quick lookup is not rate limited
+assert c.get("/api/walks/999999/terrain?quick=1").status_code == 404
+
+# --- an unexpected answer from the map server degrades gracefully instead of becoming an error page
+def weird(q, lane=None):
+    if "(around:" in q or "out tags center" in q: raise ValueError("not what we expected")
+    return fake_overpass(q, lane)
+wb.overpass = weird; kvclear(); wb._rate_calls.clear()
+wj = c.get("/api/walks/%d/terrain" % nz_id).get_json() if False else c.get("/api/walks/%d/terrain" % rocky["osm_id"]).get_json()
+assert any("Surface data unavailable" in n for n in wj["notes"]) and wj["difficulty"]["label"] and wj["runs"] == [{"cls": "unknown", "a": 0.0, "b": 1.0}]
+wp = c.get("/api/walks/%d/places" % rocky["osm_id"])
+assert wp.status_code == 502 and "Nearby places unavailable" in wp.get_json()["error"]
+wb.overpass = fake_overpass; kvclear()
 
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]

@@ -92,7 +92,7 @@ SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC",
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
-_overpass_lock = threading.Lock()
+_overpass_locks = {"bulk": threading.Lock(), "fast": threading.Lock()}   # the big searches and the lookups for an opened walk do not wait for each other
 _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
@@ -435,20 +435,27 @@ def _overpass_once(url, query):
         r = requests.post(url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=OVERPASS_TIMEOUT)
         if r.status_code != 200:
             raise RuntimeError("%s: HTTP %s" % (url.split("/")[2], r.status_code))
-        return r.json()
+        data = r.json()
+        remark = str(data.get("remark") or "") if isinstance(data, dict) else ""
+        if "runtime error" in remark.lower():
+            raise RuntimeError("%s: server too busy (%s)" % (url.split("/")[2], remark[:60]))
+        return data
     except requests.RequestException as ex:
         raise RuntimeError(_short_error(url, ex))
     except ValueError as ex:
         raise RuntimeError(_short_error(url, ex))
 
 
-def overpass(query):
-    """Ask the first server; if it has not answered within a few seconds ask the next one as well, and use whoever answers first."""
+def overpass(query, lane="fast"):
+    """Ask the first server; if it has not answered within a few seconds ask the next one as well, and use whoever answers first.
+
+    lane "bulk" is for the list searches, "fast" for everything about a walk you have opened: they never queue behind each other.
+    """
     urls = OVERPASS_URLS
     if not urls:
         raise RuntimeError("No Overpass server configured")
     errors = []
-    with _overpass_lock:
+    with _overpass_locks.get(lane, _overpass_locks["fast"]):
         pool = ThreadPoolExecutor(max_workers=len(urls))
         try:
             pending = {pool.submit(_overpass_once, urls[0], query): urls[0]}
@@ -609,7 +616,7 @@ def list_osm(s, w, n, e, want_routes, want_paths):
     if want_paths:
         parts.append(".p out tags bb %d;" % MAX_PATH_WAYS)
     walks, groups = [], {}
-    for el in overpass("".join(parts)).get("elements", []):
+    for el in overpass("".join(parts), lane="bulk").get("elements", []):
         b = el.get("bounds")
         if not b:
             continue
@@ -1466,8 +1473,9 @@ def api_places(osm_id):
         return jsonify(error="Too many lookups just now. Try again in a minute."), 429
     try:
         res = fetch_places(chain)
-    except RuntimeError as ex:
-        return jsonify(error="Nearby places unavailable: %s" % ex), 502
+    except Exception as ex:
+        app.logger.warning("places lookup failed: %r", ex)
+        return jsonify(error="Nearby places unavailable: %s" % (ex if isinstance(ex, RuntimeError) else "unexpected answer from the map server")), 502
     kv_put("places", "%s:%s" % (osm_id, len(chain)), res)
     return jsonify(res)
 
@@ -1590,6 +1598,25 @@ def build_profile(chain):
             "elev_m": [round(e, 1) for e in elev], "min": round(min(elev), 1), "max": round(max(elev), 1)}
 
 
+def profile_for(osm_id, chain, in_box):
+    """The elevation profile of a walk, from the cache when there is one. May raise RuntimeError."""
+    row = db().execute("SELECT profile FROM walks WHERE osm_id=?", (osm_id,)).fetchone() if in_box else None
+    if row and row["profile"]:
+        return json.loads(row["profile"])
+    if not in_box:
+        saved = kv_get("profile", "%s:%s" % (osm_id, len(chain)))
+        if saved:
+            return saved
+    prof = build_profile(chain)
+    if in_box:
+        conn = db()
+        conn.execute("UPDATE walks SET profile=? WHERE osm_id=?", (json.dumps(prof), osm_id))
+        conn.commit()
+    else:
+        kv_put("profile", "%s:%s" % (osm_id, len(chain)), prof)
+    return prof
+
+
 @app.get("/api/walks/<int:osm_id>/profile")
 def api_profile(osm_id):
     row = db().execute("SELECT profile FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
@@ -1599,23 +1626,14 @@ def api_profile(osm_id):
         chain, in_box = main_chain(osm_id)
     except RuntimeError as ex:
         return jsonify(error=str(ex)), 502
-    if not in_box:
-        saved = kv_get("profile", "%s:%s" % (osm_id, len(chain)))
-        if saved:
-            return jsonify(saved)
+    if not in_box and kv_get("profile", "%s:%s" % (osm_id, len(chain))):
+        return jsonify(kv_get("profile", "%s:%s" % (osm_id, len(chain))))
     if not rate_ok("profile", 60):
         return jsonify(error="Too many elevation lookups just now. Try again in a minute."), 429
     try:
-        prof = build_profile(chain)
+        return jsonify(profile_for(osm_id, chain, in_box))
     except RuntimeError as ex:
         return jsonify(error="Elevation profile unavailable: %s" % ex), 502
-    if not in_box:
-        kv_put("profile", "%s:%s" % (osm_id, len(chain)), prof)
-    if in_box:
-        conn = db()
-        conn.execute("UPDATE walks SET profile=? WHERE osm_id=?", (json.dumps(prof), osm_id))
-        conn.commit()
-    return jsonify(prof)
 
 
 @app.put("/api/walks/<int:osm_id>/note")
@@ -1820,15 +1838,19 @@ def difficulty_rating(km, ascent_m, grade_pct, totals, total_m, sac=None, source
     return {"label": label, "score": score, "reasons": reasons, "max_grade_pct": round(grade_pct, 1), "ascent_m": round(ascent_m or 0)}
 
 
-def build_terrain(chain, source_grade, known_ascent=None, cached_profile=None):
+def build_terrain(chain, source_grade, known_ascent=None, cached_profile=None, surfaces=True):
     notes = []
     total_m = chain_length_m(chain)
-    try:
-        ways, _ = fetch_surface_ways(chain)
-        runs, totals, extra = match_surfaces(chain, ways)
-    except RuntimeError as ex:
-        ways, runs, totals, extra = [], [{"cls": "unknown", "a": 0.0, "b": 1.0}], {"unknown": total_m}, {"sac": None}
-        notes.append("Surface data unavailable: %s" % ex)
+    if not surfaces:                                   # only the difficulty from distance, climbing and grade: nothing is known about the surface yet
+        runs, totals, extra = [], {}, {"sac": None}
+    else:
+        try:
+            ways, _ = fetch_surface_ways(chain)
+            runs, totals, extra = match_surfaces(chain, ways)
+        except Exception as ex:                       # whatever went wrong, the walk still opens with an honest note
+            app.logger.warning("surface lookup failed: %r", ex)
+            runs, totals, extra = [{"cls": "unknown", "a": 0.0, "b": 1.0}], {"unknown": total_m}, {"sac": None}
+            notes.append("Surface data unavailable: %s" % (ex if isinstance(ex, RuntimeError) else "unexpected answer from the map server"))
     prof = cached_profile
     if prof is None:
         try:
@@ -1843,7 +1865,7 @@ def build_terrain(chain, source_grade, known_ascent=None, cached_profile=None):
     diff = difficulty_rating(total_m / 1000.0, asc, grade, totals, total_m, extra["sac"], source_grade)
     classes = {c: {"label": SURFACES[c][0], "colour": SURFACES[c][1], "m": round(m), "pct": round(100.0 * m / total_m) if total_m else 0}
                for c, m in totals.items()}
-    return {"runs": runs, "classes": classes, "total_m": round(total_m), "difficulty": diff, "notes": notes,
+    return {"runs": runs, "classes": classes, "total_m": round(total_m), "difficulty": diff, "notes": notes, "partial": not surfaces,
             "attribution": "Surfaces from OpenStreetMap (ODbL). Where a path is not tagged the colour is white (unknown)."}
 
 
@@ -1865,11 +1887,18 @@ def api_terrain(osm_id):
         saved = kv_get("terrain", key)
         if saved:
             return jsonify(saved)
-    if not rate_ok("terrain", 20):
-        return jsonify(error="Too many lookups just now. Try again in a minute."), 429
     cached_wk = cached_walk(osm_id) or {}
     grade = (row["difficulty"] if row else cached_wk.get("difficulty"))
     prof = json.loads(row["profile"]) if row and row["profile"] else kv_get("profile", key)
+    if request.args.get("quick") != "1" and not rate_ok("terrain", 20):
+        return jsonify(error="Too many lookups just now. Try again in a minute."), 429
+    if request.args.get("quick") == "1":              # the difficulty from distance, climbing and grade alone: no OpenStreetMap needed
+        if prof is None:
+            try:
+                prof = profile_for(osm_id, chain, in_box)
+            except RuntimeError:
+                prof = None
+        return jsonify(build_terrain(chain, grade, cached_profile=prof, surfaces=False))
     res = build_terrain(chain, grade, cached_profile=prof)
     if in_box and not res["notes"]:
         conn = db()

@@ -32,6 +32,11 @@ for 6 hours, so reloading the page, or your phone discarding the tab, brings the
 aligned to a 5 km grid, and a search whose area is already covered by an earlier one (for example after the map zoomed onto a walk) is answered instantly, with
 "(saved)" in the status line. Nothing searches automatically: only the **Find walks in this map view** button (and **Go**) start a search.
 
+**Searches do not block the walk you have opened.** OpenStreetMap lookups run in two lanes: the big list searches use one, and everything about a walk you have opened
+(its route, nearby places and surfaces) uses the other, so a slow search no longer makes the surface colours or places wait. The difficulty estimate (from distance,
+climbing and steepness) appears at once and is refined, and the route is coloured, when the surface lookup finishes. An OpenStreetMap server that answers "query timed
+out" is treated as a failure, tried again on the next server, and never remembered as "nothing found".
+
 Each source is searched as its **own request**, and the page shows a source's walks the moment it answers: DOC and the council tracks usually come back
 in a second or two, while OpenStreetMap (routes and named paths) is the slowest because it runs on shared public servers. You can open a walk
 while the rest are still loading. The status line shows which sources are done and how long each took. Repeated searches of the same area are
