@@ -193,15 +193,46 @@ let lines = {};
 const $ = id => document.getElementById(id);
 function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 
+const FIND_KEY = 'walkbox.find.v1', FIND_MAX_AGE = 6 * 3600 * 1000;
+function persistFind() {                    // the light list only: routes are fetched again (instantly, from the server cache) when opened
+  try {
+    if (!findState || !findState.results.length) return;
+    const light = findState.results.map(r => { const c = Object.assign({}, r); delete c.line; delete c._originStamp; delete c.reversed; delete c.autoSwapped; delete c.est; return c; });
+    localStorage.setItem(FIND_KEY, JSON.stringify({t: Date.now(), state: Object.assign({}, findState, {results: light, selected: []}),
+      boxes: ['srcDoc', 'srcNz', 'srcRoutes', 'srcPaths'].map(id => $(id).checked)}));
+  } catch (e) { /* storage full or blocked: not important */ }
+}
+function loadPersistedFind() {
+  try {
+    const raw = localStorage.getItem(FIND_KEY); if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (!j || Date.now() - j.t > FIND_MAX_AGE || !j.state || !Array.isArray(j.state.results) || !j.state.results.length) return null;
+    return j;
+  } catch (e) { return null; }
+}
+let findState = null;      // the Find list, kept while you look at your box and restored when you come back
+function saveFindState() {
+  if (mode !== 'find') return;
+  const c = map.getCenter();
+  findState = {results, selected: [...selected], center: [c.lat, c.lng], zoom: map.getZoom(), status: $('status').textContent, origin};
+  persistFind();
+}
 function setMode(m) {
+  if (m === mode) return;
+  saveFindState();
   mode = m; origin = null; if (typeof clearSelection === 'function') clearSelection(); if (typeof clearRoute === 'function') clearRoute();
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
   $('findTools').style.display = m === 'find' ? '' : 'none';
   $('findActions').style.display = m === 'find' && results.length ? '' : 'none';
   $('boxTools').style.display = m === 'box' ? '' : 'none';
-  results = []; selected.clear(); render(); layerGroup.clearLayers();
-  if (m === 'box') loadBox(); else status('Move the map to an area, then press “Find walks in this map view”.');
+  selected.clear(); layerGroup.clearLayers();
+  if (m === 'box') { results = []; render(); loadBox(); return; }
+  if (findState && findState.results.length) {            // back to Find: the same list, the same view, nothing fetched
+    results = findState.results; findState.selected.forEach(x => selected.add(x)); origin = findState.origin;
+    render(); $('findActions').style.display = '';
+    map.setView(findState.center, findState.zoom, {animate: false}); status(findState.status);
+  } else { results = []; render(); status('Move the map to an area, then press “Find walks in this map view”.'); }
 }
 $('tabFind').onclick = () => setMode('find');
 $('tabBox').onclick = () => setMode('box');
@@ -234,6 +265,7 @@ $('place').addEventListener('keydown', e => { if (e.key === 'Enter') goPlace(); 
 
 // ---- Find ----
 let searchCtl = null, searchSeq = 0;
+const searchMemo = new Map();           // finished searches of this session, by map view and source
 const SOURCE_ORDER = ['doc', 'nz-track', 'osm-route', 'osm-path'];
 function mergeResults(bySource) {   // keep routes already loaded, drop duplicates of the same name from less curated sources
   const old = new Map(results.map(r => [r.osm_id, r]));
@@ -266,10 +298,15 @@ async function runSearch() {
   let capped = false;
   await Promise.all(want.map(async ([key, label]) => {
     try {
-      const j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources: [key]}, signal);
+      const G = 0.05, sn = {s: Math.floor(b.getSouth() / G + 1e-9) * G, w: Math.floor(b.getWest() / G + 1e-9) * G, n: Math.ceil(b.getNorth() / G - 1e-9) * G, e: Math.ceil(b.getEast() / G - 1e-9) * G};
+      let seen = null;                         // an earlier search of this session that already covers this area
+      searchMemo.forEach(v => { if (!seen && v.key === key && Date.now() - v.t < 30 * 60000 && v.s <= sn.s + 1e-9 && v.w <= sn.w + 1e-9 && v.n >= sn.n - 1e-9 && v.e >= sn.e - 1e-9) seen = v; });
+      let j;
+      if (seen) j = Object.assign({}, seen.j, {ms: 0, cached: true});
+      else { j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources: [key]}, signal); if (!(j.warnings || []).length) searchMemo.set(Date.now() + key, Object.assign({t: Date.now(), j, key}, sn)); }
       if (mine !== searchSeq) return;
       bySource[key] = j.results; capped = capped || j.capped; (j.warnings || []).forEach(w => warnings.push(w));
-      state[key] = '✓ ' + j.results.length + (j.ms ? ' (' + (j.ms / 1000).toFixed(1) + ' s)' : '');
+      state[key] = '✓ ' + j.results.length + (j.cached ? ' (saved)' : j.ms > 200 ? ' (' + (j.ms / 1000).toFixed(1) + ' s)' : j.ms ? ' (cached)' : '');
     } catch (e) {
       if (e.name === 'AbortError' || mine !== searchSeq) return;
       state[key] = '✗'; warnings.push(label + ': ' + e.message);
@@ -280,6 +317,7 @@ async function runSearch() {
   }));
   if (mine !== searchSeq) return;
   btn.textContent = 'Find walks in this map view';
+  window.setTimeout(() => { if (mode === 'find') saveFindState(); }, 50);
   const warn = warnings.length ? ' Note: ' + warnings.join(' | ') : '';
   show(true);
   status($('status').textContent + ' ' + (results.length ? results.length + ' walks' + (capped ? ' (list capped, zoom in for more)' : '') + '. Click a walk to load its route.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
@@ -471,6 +509,13 @@ function legendItems(classes) {                          // most common surface 
 }
 // END NAV
 
+const memo = new Map();                     // answers already fetched in this session, by address
+async function cachedGet(url) {
+  if (memo.has(url)) return memo.get(url);
+  const resp = await fetch(url); const j = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(j.error || ('Request failed (' + resp.status + ')'));
+  memo.set(url, j); return j;
+}
 let routeLayer = null;
 function clearRoute() { if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; } }
 async function getRoute(body, out, btn, label) {
@@ -839,8 +884,7 @@ function updateEstChip(r) {                       // the estimated difficulty on
 }
 async function loadTerrain(s) {
   try {
-    const resp = await fetch('/api/walks/' + s.r.osm_id + '/terrain'); const j = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(j.error || ('Failed (' + resp.status + ')'));
+    const j = await cachedGet('/api/walks/' + s.r.osm_id + '/terrain');
     if (sel !== s) return;
     s.terrain = j; s.r.est = j.difficulty; paintTerrain(s); showDifficulty(s); updateEstChip(s.r);
   } catch (e) { if (sel === s) { const b = $('diffbox'); if (b) b.textContent = 'Difficulty unavailable: ' + e.message; } }
@@ -911,10 +955,10 @@ function loadInfo(s) {
   body.append(dbox, wbox, sec, pbox);
   if (s.terrain) showDifficulty(s);
   const mid = pointAt(s.chain, s.cum, s.cum[s.cum.length - 1] / 2);
-  fetch('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4)).then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Weather failed'); return j; })
+  cachedGet('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4))
     .then(w => { if (sel === s) { wbox.textContent = ''; wbox.className = ''; renderWeather(wbox, w); } })
     .catch(e => { if (sel === s) wbox.textContent = e.message; });
-  fetch('/api/walks/' + s.r.osm_id + '/places').then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Places failed'); return j; })
+  cachedGet('/api/walks/' + s.r.osm_id + '/places')
     .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, s.r.reversed ? reversePlaces(d) : d); } })
     .catch(e => { if (sel === s) pbox.textContent = e.message; });
 }
@@ -923,8 +967,7 @@ async function loadProfile(s) {
   const el = $('elev'); el.style.display = 'block'; el.textContent = '';
   const msg = document.createElement('div'); msg.className = 'cap'; msg.style.padding = '10px 0'; msg.textContent = 'Loading elevation profile…'; el.appendChild(msg);
   try {
-    const resp = await fetch('/api/walks/' + s.r.osm_id + '/profile'); const j = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(j.error || ('Failed (' + resp.status + ')'));
+    const j = await cachedGet('/api/walks/' + s.r.osm_id + '/profile');
     if (sel !== s) return;
     s.profile = s.r.reversed ? reverseProfile(j) : j; drawProfile(s); if (s.along !== undefined && s.along !== null) setProgress(s);
   } catch (e) { if (sel === s) { msg.textContent = e.message; addClose(el); } }
@@ -1184,8 +1227,17 @@ function focus(id) {
   const r = results.find(x => x.osm_id == id); if (r) selectWalk(r);
 }
 
-// ---- Start with the map on the current location; fall back to Auckland CBD. No automatic search. ----
-(function startLocation() {
+// ---- Start: show the last search again if it is recent; otherwise the map goes to your current location (no automatic search) ----
+(function start() {
+  const saved = loadPersistedFind();
+  if (saved) {
+    const st = saved.state; findState = st; results = st.results; origin = st.origin || null;
+    ['srcDoc', 'srcNz', 'srcRoutes', 'srcPaths'].forEach((id, i) => { if (saved.boxes && saved.boxes[i] !== undefined) $(id).checked = saved.boxes[i]; });
+    map.setView(st.center, st.zoom, {animate: false}); render(); $('findActions').style.display = '';
+    const mins = Math.max(1, Math.round((Date.now() - saved.t) / 60000));
+    status('Showing your last search (' + results.length + ' walks, ' + (mins < 90 ? mins + ' min' : Math.round(mins / 60) + ' h') + ' ago). Nothing is fetched again until you press “Find walks in this map view”.');
+    return;
+  }
   const hint = ' Press “Find walks in this map view” to search.';
   if (!navigator.geolocation) { status('Location is not available in this browser. Showing Auckland CBD.' + hint); return; }
   navigator.geolocation.getCurrentPosition(

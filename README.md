@@ -27,6 +27,11 @@ Opening a walk you have opened before, searching an area again, or clicking away
 6 seconds (`OVERPASS_HEDGE_SECONDS`) the next one is asked as well and whichever answers first is used. The cache can be cleared by deleting the `kv` rows
 or by setting `SEARCH_CACHE_SECONDS=0` to turn off the search part.
 
+**Clicking away does not lose your search.** The Find list and map view are kept when you switch to My walk box and back, and they are saved in the browser
+for 6 hours, so reloading the page, or your phone discarding the tab, brings the same list back without searching ("Showing your last search…"). Searches are
+aligned to a 5 km grid, and a search whose area is already covered by an earlier one (for example after the map zoomed onto a walk) is answered instantly, with
+"(saved)" in the status line. Nothing searches automatically: only the **Find walks in this map view** button (and **Go**) start a search.
+
 Each source is searched as its **own request**, and the page shows a source's walks the moment it answers: DOC and the council tracks usually come back
 in a second or two, while OpenStreetMap (routes and named paths) is the slowest because it runs on shared public servers. You can open a walk
 while the rest are still loading. The status line shows which sources are done and how long each took. Repeated searches of the same area are

@@ -98,6 +98,7 @@ _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
 _weather_cache = {}
 SEARCH_TTL = int(os.environ.get("SEARCH_CACHE_SECONDS", "21600"))
+GRID_DEG = 0.05                    # searches are aligned to this grid (about 5 km), so nearby views share one cached search
 HEDGE_SECONDS = float(os.environ.get("OVERPASS_HEDGE_SECONDS", "6"))
 OVERPASS_TIMEOUT = int(os.environ.get("OVERPASS_TIMEOUT", "30"))
 KV_TTL = {"light": 7 * 86400, "detail": 7 * 86400, "places": 86400, "terrain": 7 * 86400, "profile": 30 * 86400}
@@ -512,6 +513,32 @@ def kv_put_many(kind, items):
     conn.executemany("INSERT OR REPLACE INTO kv (k, v, ts) VALUES (?,?,?)",
                      [("%s:%s" % (kind, k), json.dumps(v), now) for k, v in items])
     conn.commit()
+
+
+def snap_box(s, w, n, e):
+    """Widen a search area outwards to the grid, so views that differ a little are the same search."""
+    g = GRID_DEG
+    f = lambda v: round(v, 3)
+    return f(math.floor(s / g + 1e-9) * g), f(math.floor(w / g + 1e-9) * g), f(math.ceil(n / g - 1e-9) * g), f(math.ceil(e / g - 1e-9) * g)
+
+
+def covering_search(s, w, n, e, srcs):
+    """An earlier finished search of the same sources whose area contains this one."""
+    ttl = SEARCH_TTL
+    if ttl <= 0:
+        return None
+    rows = db().execute("SELECT k FROM kv WHERE k LIKE 'search:%' AND ts > ? ORDER BY ts DESC LIMIT 400", (time.time() - ttl,)).fetchall()
+    for r in rows:
+        try:
+            box, got = r["k"][len("search:"):].split("|")
+            s2, w2, n2, e2 = (float(x) for x in box.split(","))
+        except ValueError:
+            continue
+        if got == srcs and s2 <= s + 1e-9 and w2 <= w + 1e-9 and n2 >= n - 1e-9 and e2 >= e - 1e-9:
+            hit = kv_get("search", r["k"][len("search:"):])
+            if hit:
+                return hit
+    return None
 
 
 def cached_walk(osm_id):
@@ -963,8 +990,10 @@ def api_search():
     if not sources:
         return jsonify(error="Choose at least one source"), 400
     t0 = time.time()
-    key = "%.3f,%.3f,%.3f,%.3f|%s" % (s, w, n, e, ",".join(sorted(sources)))
-    hit = kv_get("search", key)
+    s, w, n, e = snap_box(s, w, n, e)
+    srcs = ",".join(sorted(sources))
+    key = "%.3f,%.3f,%.3f,%.3f|%s" % (s, w, n, e, srcs)
+    hit = kv_get("search", key) or covering_search(s, w, n, e, srcs)
     if hit:
         walks, problems = hit["walks"], []
         with _cache_lock:                              # make sure the results can still be opened

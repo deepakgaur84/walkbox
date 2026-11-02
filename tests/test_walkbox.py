@@ -778,6 +778,20 @@ assert conn_.execute("SELECT COUNT(*) FROM kv WHERE k LIKE 'search:%'").fetchone
 conn_.execute("UPDATE kv SET ts = ts - 100 * 86400"); conn_.commit(); conn_.close()                                                 # everything is now very old...
 n3 = remote_calls(); c.post("/api/search", json=dict(body, sources=["routes"])); assert remote_calls() > n3                          # ...so it is fetched again
 kvclear(); wb.SEARCH_TTL = 0
+# views that differ a little share one search; a smaller view inside an earlier search costs nothing
+assert wb.snap_box(-36.8485, 174.7633, -36.7981, 174.8310) == (-36.85, 174.75, -36.75, 174.85)
+assert wb.snap_box(-36.9, 174.7, -36.7, 174.9) == (-36.9, 174.7, -36.7, 174.9)
+wb.SEARCH_TTL = 21600; kvclear(); restart()
+wide = c.post("/api/search", json={"south": -36.90, "west": 174.70, "north": -36.70, "east": 174.90, "sources": ["routes"]}).get_json()
+n_w = remote_calls()
+small = c.post("/api/search", json={"south": -36.8123, "west": 174.7741, "north": -36.7902, "east": 174.8010, "sources": ["routes"]}).get_json()
+assert remote_calls() == n_w and small["results"] == wide["results"]                                  # served from the wider search
+pan = c.post("/api/search", json={"south": -36.8123, "west": 174.7741, "north": -36.7902, "east": 174.8010, "sources": ["routes", "doc"]}).get_json()
+assert remote_calls() > n_w                                                                           # other sources: a different search
+n_x = remote_calls()
+c.post("/api/search", json={"south": -36.98, "west": 174.7741, "north": -36.92, "east": 174.8010, "sources": ["routes"]})
+assert remote_calls() > n_x                                                                           # an area the earlier search did not cover
+kvclear(); wb.SEARCH_TTL = 0
 # a failed search is never remembered
 wb.SEARCH_TTL = 21600; wb.overpass = boom
 assert c.post("/api/search", json=dict(body, sources=["routes"])).status_code == 502
