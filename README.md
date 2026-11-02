@@ -27,6 +27,10 @@ while the rest are still loading. The status line shows which sources are done a
 remembered for 15 minutes (`SEARCH_CACHE_SECONDS`). If OpenStreetMap is slow for you, untick "Official routes" or "Named paths", or list a faster
 Overpass server first in `OVERPASS_URLS`.
 
+**Searching for a place** (the box next to Go) also sets where walks should start: when you open a walk that ends at that place (within about 3 km), it is turned round so
+that it starts there, and its card shows "⇄ starts at <place>". Press **⇄ Swap start / end** to put it back. Walks you add to your box from that view are saved
+the way round you are looking at.
+
 The route itself is fetched only when you **click a walk** (or when you add it to your box). After that the walk view opens, with its exact length.
 
 ## Weather and nearby places

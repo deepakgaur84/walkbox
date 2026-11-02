@@ -142,6 +142,7 @@ const MAX_SPAN = {{ max_span }};
 const ROUTING = {{ 'true' if routing_enabled else 'false' }};
 let mode = 'find';
 let results = [];
+let origin = null;   // the place last searched with Go: walks that end there are turned round to start there
 const selected = new Set();
 const AUCKLAND_CBD = [-36.8485, 174.7633];
 const map = L.map('map').setView(AUCKLAND_CBD, 13);
@@ -155,7 +156,7 @@ const $ = id => document.getElementById(id);
 function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 
 function setMode(m) {
-  mode = m; if (typeof clearSelection === 'function') clearSelection(); if (typeof clearRoute === 'function') clearRoute();
+  mode = m; origin = null; if (typeof clearSelection === 'function') clearSelection(); if (typeof clearRoute === 'function') clearRoute();
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
   $('findTools').style.display = m === 'find' ? '' : 'none';
@@ -185,6 +186,7 @@ async function goPlace() {
     const bb = j[0].boundingbox.map(Number); // s, n, w, e
     map.fitBounds([[bb[0], bb[2]], [bb[1], bb[3]]], {maxZoom: 13, animate: false});
     window._place = j[0].display_name.split(',').slice(0, 2).join(',').trim();
+    origin = {lat: +j[0].lat, lon: +j[0].lon, label: window._place, stamp: Date.now()};
     status('Moved to ' + j[0].display_name + '. Searching…');
     runSearch();
   } catch (e) { status('Place lookup failed: ' + e.message, true); }
@@ -251,7 +253,7 @@ $('addSelBtn').onclick = async () => {
   if (!selected.size) { status('Tick the walks you want first.', true); return; }
   $('addSelBtn').disabled = true; status('Adding…');
   try {
-    const j = await post('/api/walks', {ids:[...selected], place: window._place || null});
+    const j = await post('/api/walks', {ids:[...selected], place: window._place || null, reverse: results.filter(r => selected.has(r.osm_id) && r.reversed).map(r => r.osm_id)});
     results.forEach(r => { if (selected.has(r.osm_id)) r.added = true; });
     selected.clear(); render();
     status(j.added + ' walk(s) added to your box. Open “My walk box” to download them.');
@@ -380,6 +382,11 @@ function reversePlaces(d) {                   // 'km along' measured from the ot
   const T = d.total_km;
   const places = d.places.map(p => Object.assign({}, p, {along_km: +(T - p.along_km).toFixed(2)})).sort((a, b) => a.along_km - b.along_km);
   return Object.assign({}, d, {places});
+}
+function shouldReverseForOrigin(chain, o) {   // a walk that ends at the searched place is turned round so that it starts there
+  if (!o || !chain || chain.length < 2) return false;
+  const p = [o.lat, o.lon], dS = havM(chain[0], p), dE = havM(chain[chain.length - 1], p);
+  return dE + 100 < dS && dE <= 3000;
 }
 // END NAV
 
@@ -720,6 +727,7 @@ function render(keep) {
     if (r.difficulty) chip(r.difficulty);
     chip(r.source_label);
     if (r.ref) chip('ref ' + r.ref);
+    if (r.autoSwapped) chip('⇄ starts at ' + r.autoSwapped);
     body.appendChild(chips);
     if (r.my_rating) chip('My rating: ' + '★'.repeat(r.my_rating));
     if (mode === 'box') {
@@ -755,12 +763,19 @@ function render(keep) {
 }
 function reverseWalk(id) {              // walk the same route the other way round
   const r = results.find(x => x.osm_id == id); if (!r || !r.line) return;
-  r.line = r.line.map(c => c.slice().reverse()); r.reversed = !r.reversed;
+  r.line = r.line.map(c => c.slice().reverse()); r.reversed = !r.reversed; r.autoSwapped = null;
   render();                                // rebuilds cards, links and lines for the new direction
   focus(id);
 }
 $('revbtn').onclick = () => { if (sel) reverseWalk(sel.r.osm_id); };
 const loadingIds = new Set();
+function applyOrigin(r) {              // start the walk at the place that was searched for
+  if (!origin || !r.line || r._originStamp === origin.stamp) return;
+  r._originStamp = origin.stamp;
+  if (shouldReverseForOrigin(r.line[0], origin)) {
+    r.line = r.line.map(c => c.slice().reverse()); r.reversed = !r.reversed; r.autoSwapped = origin.label || 'the searched place';
+  }
+}
 async function openWalk(id) {          // routes are fetched only when a walk is clicked
   const r = results.find(x => x.osm_id == id); if (!r) return;
   if (!r.line) {
@@ -772,7 +787,11 @@ async function openWalk(id) {          // routes are fetched only when a walk is
     catch (e) { status(e.message, true); loadingIds.delete(id); if (el) el.style.opacity = ''; return; }
     loadingIds.delete(id);
     if (!results.includes(r)) return;     // the list changed while loading
+    applyOrigin(r);
     render();
+  } else {
+    const before = r.reversed; applyOrigin(r);
+    if (r.reversed !== before) render();
   }
   focus(id);
 }

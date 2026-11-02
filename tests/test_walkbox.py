@@ -585,6 +585,70 @@ wb.requests.post = real_post2
 page = c.get("/").data
 assert b'id="revbtn"' in page and b"reverseWalk" in page and b"reverse=1" in page
 
+# --- walks shown the other way round (e.g. to start at the searched place) are saved that way
+gl = c.post("/api/search", json=dict(body, sources=["paths"])).get_json()["results"]
+rk = next(x for x in gl if x["name"] == "Rocky Headland Track")
+fwd_line = c.post("/api/detail", json={"id": rk["osm_id"]}).get_json()["line"][0]
+assert c.post("/api/walks", json={"ids": [rk["osm_id"]], "reverse": [rk["osm_id"]]}).get_json()["added"] == 1
+saved = next(x for x in c.get("/api/library?q=rocky").get_json()["results"] if x["osm_id"] == rk["osm_id"])["line"][0]
+assert saved[0] == fwd_line[-1] and saved[-1] == fwd_line[0], "the box copy starts where the reversed view started"
+assert c.delete("/api/walks/%d" % rk["osm_id"]).get_json()["ok"]
+assert b"shouldReverseForOrigin" in c.get("/").data and b"autoSwapped" in c.get("/").data
+
+# --- Customised walks: save as new / replace, elevation for an unsaved route, leg routing
+base_chain = wb.json.loads(wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT geom FROM walks WHERE osm_id=?", (nz_id,)).fetchone()[0])[0]
+trimmed = base_chain[1:-1]
+cust = {"base_id": nz_id, "mode": "new", "chain": trimmed, "name": "Takapuna Beach Walkway (mine)", "description": "Starts at the cafe",
+        "difficulty": "Easy", "rating": 4, "note": "Best at sunrise"}
+cr = c.post("/api/customise", json=cust)
+cj = cr.get_json()
+assert cr.status_code == 200 and cj["source"] == "custom" and cj["source_label"] == "Custom" and cj["added"], cj
+assert cj["osm_id"] >= wb.CUSTOM_BASE and cj["osm_id"] != nz_id and cj["name"].endswith("(mine)")
+assert cj["distance_km"] < c.get("/api/library?q=takapuna+beach+walkway").get_json()["results"][0]["distance_km"] + 0.01
+assert cj["my_rating"] == 4 and cj["my_note"] == "Best at sunrise" and cj["difficulty"] == "Easy" and cj["description"] == "Starts at the cafe"
+assert cj["link"] == "https://example.org/walkway" and cj["region"] == "Takapuna" and cj["route_type"] and cj["ascent_m"]   # carried over / computed
+orig = next(x for x in c.get("/api/library?q=takapuna").get_json()["results"] if x["osm_id"] == nz_id)
+assert orig["name"] == "Takapuna Beach Walkway" and orig["source"] == "nz-track"                                          # the original is untouched
+assert [x["name"] for x in c.get("/api/library?q=sunrise").get_json()["results"]] == ["Takapuna Beach Walkway (mine)"]    # notes are searchable
+gp = c.get("/walks/%d.gpx" % cj["osm_id"]).data.decode()
+assert "Customised by the user" in gp and "Outdoor Access Commission" in gp and "example.org/walkway" not in gp.split("<trk>")[1]
+assert len(ET.fromstring(gp.encode()).findall(".//g:trkpt", ns)) == len(trimmed)
+zatt = zipfile.ZipFile(io.BytesIO(c.get("/walks.zip").data)).read("ATTRIBUTION.txt").decode()
+assert "Herenga" in zatt and "Customised by the user" in zatt
+c2 = c.post("/api/customise", json=dict(cust, base_id=cj["osm_id"], name="Mine again")).get_json()    # customising a custom walk keeps the original credit
+assert c2["osm_id"] != cj["osm_id"] and "Herenga" in c.get("/walks/%d.gpx" % c2["osm_id"]).data.decode()
+# replace the original in the box
+wb.sqlite3.connect(os.environ["DB_PATH"]).execute("UPDATE walks SET profile='{}' WHERE osm_id=222").connection.commit()
+rep_chain = [(-40.0, 170.0), (-40.0, 170.02), (-40.01, 170.03)]
+rr = c.post("/api/customise", json={"base_id": 222, "mode": "replace", "chain": rep_chain, "name": "Renamed 222"}).get_json()
+assert rr["osm_id"] == 222 and rr["name"] == "Renamed 222" and rr["source"] == "osm-route" and 2.5 < rr["distance_km"] < 4.5, rr
+assert wb.sqlite3.connect(os.environ["DB_PATH"]).execute("SELECT profile FROM walks WHERE osm_id=222").fetchone()[0] is None   # old elevation profile dropped
+assert "Customised by the user." in c.get("/walks/222.gpx").data.decode() and "OpenStreetMap" in c.get("/walks/222.gpx").data.decode()
+assert [x["name"] for x in c.get("/api/library?q=renamed").get_json()["results"]] == ["Renamed 222"]
+# not allowed / invalid
+assert c.post("/api/customise", json={"base_id": rocky["osm_id"], "mode": "replace", "chain": rep_chain}).status_code == 400   # only box walks can be replaced
+okn = c.post("/api/customise", json={"base_id": rocky["osm_id"], "mode": "new", "chain": rep_chain, "name": "From a search result"})
+assert okn.status_code == 200 and okn.get_json()["source"] == "custom"
+for bad in [dict(cust, chain=[(0, 0)]), dict(cust, chain=[(0, 0), (0, 0.00001)]), dict(cust, chain=[(95, 0), (0, 1)]), dict(cust, chain="x"),
+            dict(cust, mode="nope"), dict(cust, rating=9), dict(cust, chain=[(0.0, i * 1e-4) for i in range(6001)]), {"mode": "new"}]:
+    assert c.post("/api/customise", json=bad).status_code == 400, bad
+for wid in (cj["osm_id"], c2["osm_id"], okn.get_json()["osm_id"]):
+    assert c.delete("/api/walks/%d" % wid).get_json()["ok"]
+# elevation profile for a route that is not saved
+wb._rate_calls.clear()
+pc_ = c.post("/api/profile", json={"chain": base_chain})
+assert pc_.status_code == 200 and len(pc_.get_json()["elev_m"]) >= 2 and pc_.get_json()["total_km"] > 1
+assert c.post("/api/profile", json={"chain": [(0, 0), (0, 0.00001)]}).status_code == 400 and c.post("/api/profile", json={"chain": "x"}).status_code == 400
+wb.requests.get = down
+assert c.post("/api/profile", json={"chain": base_chain}).status_code == 502
+wb.requests.get = good_get
+# a leg between two edit points is a plain pedestrian route
+wb.requests.post = fake_vpost
+vmode["resp"] = Resp(VALHALLA_OK); vmode["exc"] = None
+lg = c.post("/api/route", json={"mode": "leg", "from": [-36.79, 174.77], "to": [-36.80, 174.78]})
+assert lg.status_code == 200 and vcalls[-1][0].endswith("/route") and len(lg.get_json()["shape"]) == 4
+wb.requests.post = real_post
+
 # --- page + delete
 wb.DB_PATH = os.environ["DB_PATH"]
 page = c.get("/").data

@@ -67,6 +67,7 @@ PATH_BASE = 10 ** 12  # synthetic ids for grouped OSM paths
 DOC_BASE = 2 * 10 ** 12  # synthetic ids for DOC tracks
 NZT_BASE = 3 * 10 ** 12  # synthetic ids for NZ national tracks
 IMPORT_BASE = 4 * 10 ** 12  # synthetic ids for imported GPX files
+CUSTOM_BASE = 5 * 10 ** 12  # ids for customised walks
 GENERIC_NAMES = {"footpath", "path", "track", "walkway", "footway", "pavement", "steps",
                  "pedestrian", "boardwalk", "trail", "walking track", "unnamed"}
 
@@ -81,12 +82,13 @@ ATTRIBUTION = {
     "nz-track": "Source: Herenga a Nuku Outdoor Access Commission national tracks dataset, compiled "
                 "from councils, LINZ and DOC. Licence not stated by the service; check the managing "
                 "organisation before reuse.",
+    "custom": "Customised by the user.",
     "import": "Imported by the user from a GPX file. Check the original source's terms before sharing.",
     "doc": "Source: New Zealand Department of Conservation, CC BY 4.0 "
            "(https://creativecommons.org/licenses/by/4.0/)",
 }
 SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC",
-                "nz-track": "NZ tracks", "import": "Imported"}
+                "nz-track": "NZ tracks", "import": "Imported", "custom": "Custom"}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
@@ -742,7 +744,16 @@ def build_gpx(row, reverse=False):
     if reverse:
         chains = [c[::-1] for c in chains]
     source = row["source"] or "osm-route"
-    attribution = ATTRIBUTION.get(source, ATTRIBUTION["osm-route"])
+    try:
+        tags = json.loads(row["tags"] or "{}")
+    except ValueError:
+        tags = {}
+    base = (tags.get("base_source") if source == "custom" else source) or "osm-route"
+    attribution = ATTRIBUTION.get(base, ATTRIBUTION["osm-route"])
+    if source == "custom":
+        attribution = "Customised by the user from another walk. Original data: " + attribution
+    elif tags.get("customised"):
+        attribution += " Customised by the user."
     desc_parts = []
     if row["description"]:
         desc_parts.append(row["description"])
@@ -755,12 +766,14 @@ def build_gpx(row, reverse=False):
         stats.append("ascent about %d m" % row["ascent_m"])
     desc_parts.append(", ".join(stats) + ". " + attribution)
     desc = " ".join(desc_parts)
-    if source == "doc" and row["link"]:
+    if base == "doc" and row["link"]:
         link = row["link"]
         link_text = "DOC page"
-    elif source == "nz-track" and row["link"]:
+    elif base == "nz-track" and row["link"]:
         link, link_text = row["link"], "Track information"
-    elif source == "import":
+    elif source == "custom" or base in ("import", "osm-path"):
+        link, link_text = "https://www.openstreetmap.org/#map=15/%.5f/%.5f" % (row["lat"], row["lon"]), "Location"
+    elif base == "import":
         link, link_text = "https://www.openstreetmap.org/#map=15/%.5f/%.5f" % (row["lat"], row["lon"]), "Location"
     elif source == "osm-path":
         link, link_text = "https://www.openstreetmap.org/#map=16/%.5f/%.5f" % (row["lat"], row["lon"]), "OpenStreetMap"
@@ -768,11 +781,11 @@ def build_gpx(row, reverse=False):
         link, link_text = "https://www.openstreetmap.org/relation/%d" % row["osm_id"], "OpenStreetMap relation"
     author = {"doc": "New Zealand Department of Conservation",
               "nz-track": "Herenga a Nuku Outdoor Access Commission",
-              "import": "Original GPX author"}.get(source, "OpenStreetMap contributors")
+              "import": "Original GPX author"}.get(base, "OpenStreetMap contributors")
     license_url = {"doc": "https://creativecommons.org/licenses/by/4.0/",
                    "nz-track": "https://www.herengaanuku.govt.nz/",
                    "import": "https://www.openstreetmap.org/copyright"}.get(
-        source, "https://opendatacommons.org/licenses/odbl/")
+        base, "https://opendatacommons.org/licenses/odbl/")
     title = row["name"] + (" (reversed)" if reverse else "")
     out = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -902,6 +915,12 @@ def api_add():
         ensure_details(found)
     except RuntimeError as ex:
         return jsonify(error="Could not fetch the route: %s" % ex), 502
+    try:
+        flip = {int(i) for i in body.get("reverse", [])}
+    except (TypeError, ValueError):
+        flip = set()
+    for wid in flip & set(found):                       # walks shown the other way round are saved that way
+        found[wid] = dict(found[wid], chains=[c[::-1] for c in found[wid]["chains"]])
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn = db()
     existing = {r["osm_id"] for r in conn.execute(
@@ -1014,6 +1033,11 @@ def download_zip():
         for r in rows:
             z.writestr(safe_filename(r["name"], r["osm_id"]), build_gpx(r))
             used.add(r["source"] or "osm-route")
+            if r["source"] == "custom":
+                try:
+                    used.add(json.loads(r["tags"] or "{}").get("base_source") or "osm-route")
+                except ValueError:
+                    pass
         z.writestr("ATTRIBUTION.txt", "\n".join("Route data: " + ATTRIBUTION.get(u, ATTRIBUTION["osm-route"]) for u in sorted(used)) + "\n")
     return Response(buf.getvalue(), mimetype="application/zip",
                     headers={"Content-Disposition": 'attachment; filename="walkbox-walks.zip"'})
@@ -1112,7 +1136,7 @@ def api_route():
     b = request.get_json(silent=True) or {}
     opts = {"units": "kilometers", "language": "en-US"}
     try:
-        if b.get("mode") == "to_start":
+        if b.get("mode") in ("to_start", "leg"):
             payload = {"locations": [_pt(b["from"]), _pt(b["to"])], "costing": "pedestrian",
                        "directions_options": opts}
             data = valhalla_call("/route", payload)
@@ -1483,6 +1507,103 @@ def api_note(osm_id):
     if not cur.rowcount:
         abort(404)
     return jsonify(ok=True, my_rating=rating, my_note=note)
+
+
+# --------------------------------------------------------------------------
+# Customised walks (edited in the browser, saved as a new walk or over the original)
+# --------------------------------------------------------------------------
+def _chain_from(v, limit=6000):
+    chain = [(float(p[0]), float(p[1])) for p in v]
+    if not (2 <= len(chain) <= limit) or any(not (-90 <= a <= 90 and -180 <= o <= 180) for a, o in chain):
+        raise ValueError
+    return chain
+
+
+@app.post("/api/profile")
+def api_profile_chain():
+    """Elevation profile for a route that is being edited (not saved yet)."""
+    try:
+        chain = _chain_from((request.get_json(silent=True) or {})["chain"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return jsonify(error="Invalid route"), 400
+    if chain_length_m(chain) < 20:
+        return jsonify(error="The route is too short for a profile."), 400
+    if not rate_ok("profile", 60):
+        return jsonify(error="Too many elevation lookups just now. Try again in a minute."), 429
+    try:
+        return jsonify(build_profile(simplify(chain, 1500)))
+    except RuntimeError as ex:
+        return jsonify(error="Elevation profile unavailable: %s" % ex), 502
+
+
+@app.post("/api/customise")
+def api_customise():
+    b = request.get_json(silent=True) or {}
+    try:
+        chain = _chain_from(b["chain"])
+        base_id = int(b["base_id"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return jsonify(error="Invalid route"), 400
+    if chain_length_m(chain) < 20:
+        return jsonify(error="The route is too short to save."), 400
+    mode = b.get("mode")
+    if mode not in ("new", "replace"):
+        return jsonify(error="mode must be new or replace"), 400
+    rating = b.get("rating")
+    if rating is not None:
+        try:
+            rating = int(rating)
+        except (TypeError, ValueError):
+            return jsonify(error="Rating must be 1 to 5"), 400
+        if not 1 <= rating <= 5:
+            return jsonify(error="Rating must be 1 to 5"), 400
+    name = str(b.get("name") or "").strip()[:200] or "Custom walk"
+    desc = str(b.get("description") or "").strip()[:2000] or None
+    diff = str(b.get("difficulty") or "").strip()[:40] or None
+    note = str(b.get("note") or "").strip()[:2000] or None
+    conn = db()
+    base = conn.execute("SELECT * FROM walks WHERE osm_id=?", (base_id,)).fetchone()
+    with _cache_lock:
+        cached = _cache.get(base_id) or {}
+    if mode == "replace" and not base:
+        return jsonify(error="Only a walk that is already in your box can be replaced. Save it as a new walk instead."), 400
+    if base:
+        base_tags = json.loads(base["tags"] or "{}")
+        base_source = (base_tags.get("base_source") if base["source"] == "custom" else base["source"]) or "osm-route"
+        base_name, link, region, operator = base["name"], base["link"], base["region"], base["operator"]
+    else:
+        base_source = cached.get("source") or "osm-route"
+        base_name, link, region, operator = cached.get("name"), cached.get("link"), cached.get("region"), cached.get("operator")
+    pts = chain
+    lat, lon = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+    km = round(chain_length_m(chain) / 1000.0, 2)
+    rtype = route_type_of([chain])
+    ascent = elevation_gain(chain)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if mode == "replace":
+        tags = dict(base_tags)
+        tags["customised"] = True
+        tags["base_source"] = base_source
+        conn.execute(
+            "UPDATE walks SET name=?, description=?, difficulty=?, distance_km=?, lat=?, lon=?, geom=?, tags=?,"
+            " route_type=?, ascent_m=?, profile=NULL, time_text=NULL, my_rating=?, my_note=? WHERE osm_id=?",
+            (name, desc, diff, km, lat, lon, json.dumps([chain]), json.dumps(tags), rtype, ascent, rating, note, base_id))
+        wid = base_id
+    else:
+        wid = CUSTOM_BASE + int(time.time() * 1000) % 10 ** 9
+        while conn.execute("SELECT 1 FROM walks WHERE osm_id=?", (wid,)).fetchone():
+            wid += 1
+        tags = {"base_source": base_source, "customised_from": base_id, "base_name": base_name}
+        conn.execute(
+            "INSERT INTO walks (osm_id,name,ref,network,operator,description,distance_km,lat,lon,place,tags,geom,added_at,"
+            "source,difficulty,route_type,ascent_m,link,region,time_text,my_rating,my_note) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (wid, name, None, None, operator, desc, km, lat, lon, None, json.dumps(tags), json.dumps([chain]), now,
+             "custom", diff, rtype, ascent, link, region, None, rating, note))
+    conn.commit()
+    d = dict(conn.execute("SELECT * FROM walks WHERE osm_id=?", (wid,)).fetchone())
+    d["chains"] = json.loads(d["geom"])
+    return jsonify(public(d, True), ), 200
 
 
 # --------------------------------------------------------------------------
