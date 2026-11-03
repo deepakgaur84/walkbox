@@ -1066,4 +1066,43 @@ c2.execute("DELETE FROM seed_state"); c2.commit(); os.environ["SEED_AUTOSTART"] 
 assert c2.execute("SELECT COUNT(*) FROM seed_state").fetchone()[0] == 0                                    # switched off by SEED_AUTOSTART=0
 os.environ["SEED_AUTOSTART"] = "1"
 assert b"dataPanel" in c.get("/").data and b"tabData" in c.get("/").data and b"Download selected" in c.get("/").data
+
+# ==========================================================================
+# Search by walk name, anywhere in NZ
+# ==========================================================================
+wb._rate_calls.clear(); kvclear()
+fl = []
+def find_get(url, **kw):
+    fl.append(kw.get("params") or {}); return fake_get(url, **kw)
+wb.requests.get = find_get
+r = c.post("/api/find", json={"q": "kauri", "sources": ["doc", "nz"]}).get_json()
+assert [(x["name"], x["source"]) for x in r["results"]] == [("Test Kauri Track", "doc")], r                    # the DOC one wins over the council copy
+assert any("LIKE '%KAURI%'" in str(p.get("where")) for p in fl), fl                                            # asked the sources by name, with no map area
+assert not any("geometry" in p for p in fl if "where" in p and "LIKE" in str(p["where"]))
+r = c.post("/api/find", json={"q": "Takapuna  beach", "sources": ["doc", "nz"]}).get_json()
+assert [x["name"] for x in r["results"]] == ["Takapuna Beach Walkway"] and r["results"][0]["source"] == "nz-track", r   # every word must match, in any order
+nzl = wb._cache[r["results"][0]["osm_id"]]
+assert nzl["recipe"]["authority"] == "Auckland Council" and nzl["recipe"]["bbox"] == [-48.0, 166.0, -34.0, 179.5], nzl["recipe"]
+r = c.post("/api/find", json={"q": "edge", "sources": ["paths", "routes"]}).get_json()
+assert [x["name"] for x in r["results"]] == ["Edge Walk"] and any("Data tab" in n for n in r["notes"]), r        # OpenStreetMap walks come from the download
+assert c.post("/api/find", json={"q": "zzzz", "sources": ["doc", "nz", "paths"]}).get_json()["results"] == []
+assert c.post("/api/find", json={"q": "a"}).status_code == 400 and c.post("/api/find", json={"q": "!!"}).status_code == 400
+assert c.post("/api/find", json={"q": "kauri", "sources": ["bogus"]}).status_code == 400
+assert c.post("/api/find", json={"q": "x'; DROP TABLE store; --"}).status_code == 200                           # words only: quotes never reach a query
+assert conn.execute("SELECT COUNT(*) FROM store").fetchone()[0] == 2
+# a stored download answers by name with no live call
+wb.seed_set(conn, "store_doc", "done"); wb.seed_set(conn, "store_nz", "done")
+wb.store_put(conn, wb.make_light(wb.DOC_BASE + 9, "doc", "Maungauika North Head Historic Walk", {"kind": "doc", "oid": 9}, {}, 2.4, False, None), (-36.83, 174.8, -36.82, 174.82)); conn.commit()
+wb.requests.get = nope
+r = c.post("/api/find", json={"q": "north head historic", "sources": ["doc", "nz"]}).get_json()
+assert [x["name"] for x in r["results"]] == ["Maungauika North Head Historic Walk"], r
+dw = wb.make_walk(wb.DOC_BASE + 9, "doc", "Maungauika North Head Historic Walk", [[(-36.83, 174.80), (-36.825, 174.81), (-36.82, 174.82)]], {})
+dw["recipe"] = {"kind": "doc", "oid": 9}
+wb.store_put(conn, wb.make_light(wb.DOC_BASE + 9, "doc", dw["name"], dw["recipe"], {}, 2.4, False, None), (-36.83, 174.8, -36.82, 174.82), dw); conn.commit()
+wb._cache.pop(wb.DOC_BASE + 9, None)
+r = c.post("/api/find", json={"q": "historic walk", "sources": ["doc"]}).get_json()
+d = c.post("/api/detail", json={"id": r["results"][0]["osm_id"]}).get_json()
+assert d["line"] and d["name"] == "Maungauika North Head Historic Walk", d                                       # opens from the download, no internet
+wb.requests.get = fake_get
+assert b"runNameSearch" in c.get("/").data and b"Search all NZ" in c.get("/").data
 print("SEED TESTS PASSED")

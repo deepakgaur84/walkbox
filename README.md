@@ -161,6 +161,13 @@ The NAS only pulls that image, so no code folder and no `git` on the NAS are nee
 
 To update after code changes: push to `main`, wait for the green tick on the Actions tab, then redeploy the stack in Dockhand with "pull latest image".
 
+## Search by name or by map
+
+Type in the box at the top of **Find**. With text in it the big button becomes **Search all NZ for “…”**: it lists every walk whose name
+holds all the words you typed (any order), anywhere in New Zealand, not just the map view; press Enter for the same. **Go to place** moves
+the map to a place instead. With the box empty the button searches the map view, as before. DOC and council walks are searched by name
+straight away; OpenStreetMap walks can be searched by name once their download on the Data tab has finished.
+
 ## One-off NZ downloads (the Data tab)
 
 The **Data** tab downloads New Zealand data once, with a progress bar for each item. All six boxes start ticked.

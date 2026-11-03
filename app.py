@@ -704,8 +704,12 @@ def list_doc(s, w, n, e):
                      "walkingAndTrampingWebPage,Shape__Length",
         "resultRecordCount": MAX_RESULTS, "f": "json",
     }
+    return doc_lights(_arcgis_get(DOC_URL, params, "DOC").get("features", []))
+
+
+def doc_lights(features):
     walks = []
-    for f in _arcgis_get(DOC_URL, params, "DOC").get("features", []):
+    for f in features:
         p = _props(f)
         if p.get("objectid") is None:
             continue
@@ -753,8 +757,12 @@ def list_nz(s, w, n, e):
                      "DogAccess,MobilityAccess,ManagedBy,Shape__Length",
         "resultRecordCount": 2000, "f": "json",
     }
+    return nz_lights(_arcgis_get(NZT_URL, params, "NZ tracks").get("features", []), [s, w, n, e])
+
+
+def nz_lights(features, bbox):
     groups = {}
-    for f in _arcgis_get(NZT_URL, params, "NZ tracks").get("features", []):
+    for f in features:
         p = _props(f)
         name = str(p.get("name") or p.get("maintrail") or "").strip()
         if not name or name.lower() in GENERIC_NAMES:
@@ -774,7 +782,7 @@ def list_nz(s, w, n, e):
         sm = _nz_summary(g["props"])
         walks.append(make_light(
             nz_light_id(g["name"], sm["authority"]), "nz-track", g["name"],
-            {"kind": "nz", "name": g["name"], "bbox": [s, w, n, e]}, {"operator": sm["operator"]},
+            {"kind": "nz", "name": g["name"], "bbox": bbox, "authority": sm["authority"]}, {"operator": sm["operator"]},
             dist, False, None, description=sm["description"], difficulty=sm["difficulty"],
             link=sm["link"], region=sm["region"]))
     return walks
@@ -802,11 +810,20 @@ def search_all(s, w, n, e, sources):
                 walks += fut.result()
             except RuntimeError as ex:
                 problems.append("%s: %s" % (label, ex))
-    # Prefer curated sources: drop duplicates of the same name from less curated ones.
+    walks = prefer_curated(walks)
+    remember(walks)
+    return walks, problems
+
+
+def prefer_curated(walks):
+    """Drop duplicates of the same name from the less curated sources."""
     doc_names = {x["name"].lower() for x in walks if x["source"] == "doc"}
     walks = [x for x in walks if not (x["source"] == "nz-track" and x["name"].lower() in doc_names)]
     curated = {x["name"].lower() for x in walks if x["source"] in ("doc", "nz-track")}
-    walks = [x for x in walks if not (x["source"] == "osm-path" and x["name"].lower() in curated)]
+    return [x for x in walks if not (x["source"] == "osm-path" and x["name"].lower() in curated)]
+
+
+def remember(walks):
     with _cache_lock:
         for wk in walks:
             old = _cache.get(wk["osm_id"])
@@ -815,7 +832,6 @@ def search_all(s, w, n, e, sources):
         if len(_cache) > 3000:
             for k in list(_cache)[:1500]:
                 _cache.pop(k, None)
-    return walks, problems
 
 
 def _esc_sql(v):
@@ -849,8 +865,9 @@ def load_detail(wk):
         full = got[0] if got else None
     elif kind == "nz":
         b, nm = rec["bbox"], _esc_sql(rec["name"])
+        auth = " AND LocalAuthority='%s'" % _esc_sql(rec["authority"]) if rec.get("authority") else ""
         data = _arcgis_get(NZT_URL, {
-            "where": "(Name='%s' OR MainTrail='%s') AND %s" % (nm, nm, NZ_WHERE),
+            "where": "(Name='%s' OR MainTrail='%s') AND %s%s" % (nm, nm, NZ_WHERE, auth),
             "geometry": "%f,%f,%f,%f" % (b[1], b[0], b[3], b[2]), "geometryType": "esriGeometryEnvelope",
             "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "outSR": 4326,
             "resultRecordCount": 2000, "f": "geojson"}, "NZ tracks")
@@ -2707,6 +2724,89 @@ def api_seed_cancel():
         elif st == "running":
             seed_set(conn, item, "cancelling", msg="Stopping…")
     return api_seed_status()
+
+
+# --------------------------------------------------------------------------
+# Search by walk name, anywhere in New Zealand (not limited to the map)
+# --------------------------------------------------------------------------
+FIND_LIMIT = 200
+
+
+def name_tokens(q):
+    return [x for x in re.findall(r"[^\W_]+", (q or "").lower()) if x][:5]
+
+
+def _like_where(tokens, fields):
+    return " AND ".join("(%s)" % " OR ".join("UPPER(%s) LIKE '%%%s%%'" % (f, _esc_sql(tok.upper())) for f in fields) for tok in tokens)
+
+
+def find_by_name(tokens, sources):
+    """Walks whose name holds every word, from the stored download where there is one and live from DOC / the national tracks otherwise."""
+    walks, problems, notes = [], [], []
+    conn = db()
+    kinds = []
+    if "doc" in sources and store_done("store_doc"):
+        kinds.append("doc")
+    if "nz" in sources and store_done("store_nz"):
+        kinds.append("nz-track")
+    if "routes" in sources:
+        kinds.append("osm-route")
+    if "paths" in sources:
+        kinds.append("osm-path")
+    if kinds:
+        like = " AND ".join("name LIKE ?" for _ in tokens)
+        rows = conn.execute("SELECT light FROM store WHERE source IN (%s) AND %s LIMIT ?" % (",".join("?" * len(kinds)), like),
+                            kinds + ["%" + tok + "%" for tok in tokens] + [FIND_LIMIT * 3]).fetchall()
+        walks += [json.loads(r["light"]) for r in rows]
+    if ("routes" in sources or "paths" in sources) and seed_status(conn, "store_osm") != "done":
+        notes.append("OpenStreetMap walks can be searched by name once their download on the Data tab has finished.")
+    if "doc" in sources and not store_done("store_doc"):
+        try:
+            data = _arcgis_get(DOC_URL, {
+                "where": _like_where(tokens, ["name"]), "returnGeometry": "false", "f": "json", "resultRecordCount": FIND_LIMIT,
+                "outFields": "OBJECTID,name,introduction,difficulty,completionTime,walkingAndTrampingWebPage,Shape__Length"}, "DOC")
+            walks += doc_lights(data.get("features", []))
+        except RuntimeError as ex:
+            problems.append("DOC: %s" % ex)
+    if "nz" in sources and not store_done("store_nz"):
+        try:
+            data = _arcgis_get(NZT_URL, {
+                "where": "%s AND (%s)" % (NZ_WHERE, _like_where(tokens, ["Name", "MainTrail"])), "returnGeometry": "false", "f": "json",
+                "resultRecordCount": 2000,
+                "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,DogAccess,MobilityAccess,ManagedBy,Shape__Length"}, "NZ tracks")
+            nz_s, nz_n, nz_w, nz_e = NZ_BOX
+            walks += nz_lights(data.get("features", []), [nz_s, nz_w, nz_n, nz_e])
+        except RuntimeError as ex:
+            problems.append("NZ tracks: %s" % ex)
+    seen, out = set(), []
+    for wk in prefer_curated(walks):
+        if wk["osm_id"] not in seen and all(tok in wk["name"].lower() for tok in tokens):
+            seen.add(wk["osm_id"])
+            out.append(wk)
+    q = " ".join(tokens)
+    order = {"doc": 0, "nz-track": 1, "osm-route": 2, "osm-path": 3}
+    out.sort(key=lambda x: (0 if x["name"].lower() == q else 1 if x["name"].lower().startswith(q) else 2,
+                            order.get(x["source"], 9), -(x["distance_km"] or 0)))
+    remember(out)
+    return out[:FIND_LIMIT], problems, notes
+
+
+@app.post("/api/find")
+def api_find():
+    b = request.get_json(silent=True) or {}
+    tokens = name_tokens(b.get("q"))
+    if not tokens or sum(len(x) for x in tokens) < 2:
+        return jsonify(error="Type at least two letters of the walk's name"), 400
+    sources = [x for x in (b.get("sources") or ALL_SOURCES) if x in ALL_SOURCES]
+    if not sources:
+        return jsonify(error="Choose at least one source"), 400
+    t0 = time.time()
+    walks, problems, notes = find_by_name(tokens, sources)
+    if not walks and problems:
+        return jsonify(error="Could not search: " + " | ".join(problems)), 502
+    have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
+    return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks], warnings=problems, notes=notes,
+                   capped=len(walks) >= FIND_LIMIT, ms=int((time.time() - t0) * 1000))
 
 
 if os.environ.get("SEED_RUNNER", "1") == "1":
