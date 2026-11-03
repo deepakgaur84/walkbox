@@ -48,7 +48,7 @@ services:
   walkbox-overpass:
     # Your own OpenStreetMap query server for NZ, so searches never wait on the busy public ones.
     # First start downloads NZ and imports it (a few GB, can take hours); watch the container log.
-    image: wiso/overpass-api:latest
+    image: wiktorn/overpass-api:latest
     container_name: walkbox-overpass
     volumes:
       # Holds the imported database. Must exist before deploy.
@@ -56,7 +56,9 @@ services:
     environment:
       OVERPASS_MODE: init
       OVERPASS_META: "no"
-      OVERPASS_PLANET_URL: https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.bz2
+      # Geofabrik only publishes .pbf, so it is converted to the format Overpass imports (done by the image).
+      OVERPASS_PLANET_URL: https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf
+      OVERPASS_PLANET_PREPROCESS: "mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf"
       OVERPASS_DIFF_URL: https://download.geofabrik.de/australia-oceania/new-zealand-updates/
       OVERPASS_RULES_LOAD: "10"
       OVERPASS_STOP_AFTER_INIT: "false"
