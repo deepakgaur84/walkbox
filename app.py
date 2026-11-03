@@ -13,9 +13,13 @@ import io
 import json
 import math
 import os
+import pickle
 import re
+import select
 import sqlite3
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import zlib
@@ -58,12 +62,8 @@ OVERPASS_LOCAL_URL = os.environ.get("OVERPASS_LOCAL_URL", "").strip()    # e.g. 
 VALHALLA_DIR = os.environ.get("VALHALLA_DIR", "/valhalla")               # optional read-only mount, only to show the size
 OVERPASS_DIR = os.environ.get("OVERPASS_DIR", "/overpass")
 SEED_CELL_DEG = float(os.environ.get("SEED_CELL_DEG", "0.5"))
-SEED_TIMEOUT = int(os.environ.get("SEED_TIMEOUT", "180"))
-SEED_ATTEMPTS = int(os.environ.get("SEED_ATTEMPTS", "2"))               # tries for one square before it is cut into four
-SEED_MAX_SPLIT = int(os.environ.get("SEED_MAX_SPLIT", "4"))             # 0.5° squares can be halved this many times (down to about 3 km)
-SEED_RETRY_PAUSE = float(os.environ.get("SEED_RETRY_PAUSE_SECONDS", "8"))
-SEED_GIVE_UP_AFTER = int(os.environ.get("SEED_GIVE_UP_AFTER", "12"))    # this many refusals in a row: the servers are not answering
-SEED_PAUSE = float(os.environ.get("SEED_PAUSE_SECONDS", "1.5"))          # a polite gap between big requests to the public servers
+SEED_PAUSE = float(os.environ.get("SEED_PAUSE_SECONDS", "0.3"))          # a polite gap between requests to the DOC / council servers
+OSM_REFRESH_DAYS = float(os.environ.get("OSM_REFRESH_DAYS", "30"))        # the OSM file and store are renewed this often (0 = never by themselves)
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "150"))
 MAX_PATH_WAYS = int(os.environ.get("MAX_PATH_WAYS", "2500"))
@@ -119,7 +119,7 @@ SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC",
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
-_overpass_locks = {"bulk": threading.Lock(), "fast": threading.Lock(), "seed": threading.Lock()}   # the big searches and the lookups for an opened walk do not wait for each other
+_overpass_locks = {"bulk": threading.Lock(), "fast": threading.Lock()}   # the big searches and the lookups for an opened walk do not wait for each other
 _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
@@ -495,7 +495,7 @@ def overpass(query, lane="fast"):
     if not urls:
         raise RuntimeError("No Overpass server configured")
     errors = []
-    limit = SEED_TIMEOUT if lane == "seed" else None            # the one-off download may ask for big areas
+    limit = None
     with _overpass_locks.get(lane, _overpass_locks["fast"]):
         pool = ThreadPoolExecutor(max_workers=len(urls))
         try:
@@ -2266,12 +2266,12 @@ def api_delete(osm_id):
 # One-off NZ downloads (the "Data" tab)
 # --------------------------------------------------------------------------
 # Items Walkbox downloads itself, in the order they run. The first two are small and quick.
-SEED_RUN_ORDER = ["store_doc", "store_nz", "store_osm", "osm_extract"]
+SEED_RUN_ORDER = ["store_doc", "store_nz", "osm_extract", "store_osm"]      # the OSM store is built from the extract, so the file comes first
 SEED_LABELS = {
-    "osm_extract": ("Raw OSM extract", "The whole-NZ OpenStreetMap file (about 400 MB), saved to the data folder."),
+    "osm_extract": ("Raw OSM extract", "The whole-NZ OpenStreetMap file (about 400 MB), saved to the data folder. Fetched again every month."),
     "valhalla": ("Valhalla routing tiles", "Built inside the walkbox-valhalla container (about 1–2 GB). Walkbox shows its progress."),
-    "overpass_db": ("Self-hosted Overpass database", "Imported inside the walkbox-overpass container (about 3–6 GB). Walkbox shows its progress."),
-    "store_osm": ("Walkbox's own store: OpenStreetMap walks", "Routes and named paths for all NZ, kept in Walkbox's database (about 20–60 MB)."),
+    "overpass_db": ("Self-hosted Overpass database", "Optional: only shown when OVERPASS_LOCAL_URL points at your own Overpass container."),
+    "store_osm": ("Walkbox's own store: OpenStreetMap walks", "Routes and named paths for all NZ, built from the extract above and kept in Walkbox's database (about 100 MB). Rebuilt every month."),
     "store_doc": ("DOC walking experiences", "Every DOC walk with its route (about 5 MB)."),
     "store_nz": ("National tracks (council and other)", "Every council and other national track with its route (about 60 MB)."),
 }
@@ -2433,7 +2433,7 @@ def seed_nz(conn):
 
 
 def seed_cells():
-    """The 0.5° squares that cover NZ, nearest Auckland first, so Auckland becomes usable early."""
+    """The 0.5° squares that cover NZ. A square counts as "stored" once the OpenStreetMap store is built, so search can use it."""
     step, cells = SEED_CELL_DEG, []
     s = NZ_BOX[0]
     while s < NZ_BOX[1]:
@@ -2450,132 +2450,239 @@ def cell_id(s, w):
     return "%.3f,%.3f" % (s, w)
 
 
-class Refusals:
-    """Counts how many requests in a row the servers refused, so a dead server stops the job instead of grinding for hours."""
-    def __init__(self):
-        self.row, self.last = 0, ""
+# --- the raw OpenStreetMap file, and the walking store built from it ------------------------------------
+def extract_path():
+    name = OSM_EXTRACT_URL.rstrip("/").rsplit("/", 1)[-1] or "extract.osm.pbf"
+    return os.path.join(DATA_DIR, "osm", name)
 
 
-def _osm_cell(conn, s, w, n, e, refusals, depth=0):
-    """Store the walks of one square. If the servers refuse it, try once more, then cut it in four and try each part.
+def extract_age_days():
+    p = extract_path()
+    return (time.time() - os.path.getmtime(p)) / 86400.0 if os.path.exists(p) else None
 
-    Returns (walks stored, [parts that could not be fetched])."""
-    err = None
-    for attempt in range(max(1, SEED_ATTEMPTS)):
+
+def extract_stale():
+    age = extract_age_days()
+    return bool(OSM_REFRESH_DAYS > 0 and age is not None and age > OSM_REFRESH_DAYS)
+
+
+def cluster_boxes(boxes, pad=0.003):
+    """Group boxes [s, w, n, e] that touch each other (within `pad` degrees, about 300 m). Returns lists of positions."""
+    order = sorted(range(len(boxes)), key=lambda i: boxes[i][0])
+    parent = list(range(len(boxes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    active = []
+    for i in order:
+        s, w, n, e = boxes[i]
+        active = [j for j in active if boxes[j][2] + pad >= s]
+        for j in active:
+            b = boxes[j]
+            if not (e < b[1] - pad or w > b[3] + pad):
+                parent[find(i)] = find(j)
+        active.append(i)
+    groups = {}
+    for i in range(len(boxes)):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def _scan_progress(phase, count):
+    """(bar position out of 100, text) for a progress line from the reader process."""
+    if phase == "start":
+        return 2, "Opening the OSM file…"
+    if phase == "relations":
+        return min(8, 2 + count // 20000), "Looking through route relations (%d so far)…" % count
+    if phase == "routes":
+        return 10, "Found %d walking routes. Reading footpaths and tracks…" % count
+    if phase == "ways":
+        return min(35, 10 + int(25 * count / 1800000.0)), "Reading footpaths and tracks (%d thousand ways looked at)…" % (count // 1000)
+    if phase == "waysdone":
+        return 36, "Found %d walking ways. Placing them on the map…" % count
+    if phase == "nodes":
+        return min(55, 36 + int(19 * count / 45000000.0)), "Placing them on the map (%d million points looked at)…" % (count // 1000000)
+    if phase == "nodesdone":
+        return 58, "Placed %d points. Finishing the read…" % count
+    return 60, "Read the file. Joining the ways into walks…"
+
+
+def run_scan(conn, path):
+    """Read the extract in a separate process, so a big read can never slow the website or take it down."""
+    out = os.path.join(os.path.dirname(path), "scan.tmp")
+    for stale in (out, out + ".part"):
+        if os.path.exists(stale):
+            os.remove(stale)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "osm_scan.py")
+    proc = subprocess.Popen([sys.executable, script, path, out, ROUTE_TYPES, PATH_HIGHWAYS],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+    t0, last, pos, msg, tail, buf = time.time(), 0.0, 2, "Opening the OSM file…", [], b""
+    try:
+        while True:
+            ready, _, _ = select.select([proc.stdout], [], [], 2.0)
+            if ready:
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line.startswith("T "):
+                        parts = line.split()
+                        pos, msg = _scan_progress(parts[1], int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0)
+                    elif line and line != "OK":
+                        tail = (tail + [line])[-4:]
+            elif proc.poll() is not None:
+                break
+            if time.time() - last > 1.5:
+                last = time.time()
+                seed_check(conn, "store_osm", done=pos, total=100, msg="%s (%d s)" % (msg, time.time() - t0))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
         try:
-            walks = list_osm(s, w, n, e, True, True, max_rel=3000, max_ways=40000, lane="seed", qtimeout=SEED_TIMEOUT)
-            break
-        except RuntimeError as ex:
-            err = ex
-            refusals.row += 1
-            refusals.last = str(ex)
-            if refusals.row >= SEED_GIVE_UP_AFTER:
-                raise RuntimeError("The OpenStreetMap servers keep refusing big requests (%s)." % str(ex)[:160])
-            if attempt + 1 < SEED_ATTEMPTS and SEED_RETRY_PAUSE:
-                time.sleep(SEED_RETRY_PAUSE)
-    else:
-        if depth >= SEED_MAX_SPLIT:
-            return 0, [(s, w, n, e)]
-        ms, mw = (s + n) / 2, (w + e) / 2
-        total, failed = 0, []
-        for a, b, c2, d in ((s, w, ms, mw), (s, mw, ms, e), (ms, w, n, mw), (ms, mw, n, e)):
-            got, bad = _osm_cell(conn, a, b, c2, d, refusals, depth + 1)
-            total += got
-            failed += bad
-        return total, failed
-    refusals.row = 0
-    for wk in walks:
-        if wk["source"] == "osm-route":
-            bb = wk.get("bb") or [wk["lat"], wk["lon"], wk["lat"], wk["lon"]]
-        else:
-            bb = wk["recipe"]["bbox"]
-        store_put(conn, wk, bb)
-    conn.commit()
-    return len(walks), []
+            proc.stdout.close()
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        if proc.returncode < 0:
+            raise RuntimeError("Reading the OSM file was stopped by the system (probably not enough memory). Close other apps on the NAS and press Download again.")
+        raise RuntimeError("Reading the OSM file failed: %s" % (" ".join(tail) or "exit code %s" % proc.returncode)[:240])
+    try:
+        with open(out, "rb") as fh:
+            return pickle.load(fh)
+    finally:
+        os.remove(out)
 
 
-def merge_osm_paths(conn):
-    """A path that runs across the edge of two squares was stored twice; join the two halves into one."""
-    rows = conn.execute("SELECT osm_id, name, s, w, n, e, light FROM store WHERE source='osm-path' ORDER BY name, s").fetchall()
-    i, merged = 0, 0
-    while i < len(rows):
-        j = i
-        while j < len(rows) and rows[j]["name"] == rows[i]["name"]:
-            j += 1
-        clusters = []                                                    # boxes of the same name that touch each other
-        for r in rows[i:j]:
-            hit = [c for c in clusters if not (r["n"] < c["s"] - 0.003 or r["s"] > c["n"] + 0.003 or r["e"] < c["w"] - 0.003 or r["w"] > c["e"] + 0.003)]
-            if not hit:
-                clusters.append({"s": r["s"], "w": r["w"], "n": r["n"], "e": r["e"], "rows": [r]})
+OSM_NEW_TABLE = ("CREATE TABLE store_osm_new (osm_id INTEGER PRIMARY KEY, source TEXT NOT NULL, name TEXT NOT NULL, "
+                 "s REAL, w REAL, n REAL, e REAL, light TEXT NOT NULL, detail TEXT)")
+
+
+def _line(pts):
+    return [(pts[i], pts[i + 1]) for i in range(0, len(pts), 2)]
+
+
+def store_scan(conn, scan):
+    """Turn what the reader found into walks and swap them into the store in one go. Returns (routes, paths)."""
+    ways = scan["ways"]
+    conn.execute("DROP TABLE IF EXISTS store_osm_new")
+    conn.execute(OSM_NEW_TABLE)
+
+    def put(light, bbox, detail):
+        conn.execute("INSERT OR REPLACE INTO store_osm_new (osm_id, source, name, s, w, n, e, light, detail) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (light["osm_id"], light["source"], light["name"], bbox[0], bbox[1], bbox[2], bbox[3],
+                      json.dumps(light, separators=(",", ":")), json.dumps(detail, separators=(",", ":"))))
+
+    # 1. official route relations: their ways joined end to end
+    routes = paths = 0
+    items = list(scan["routes"].items())
+    for n, (rid, r) in enumerate(items):
+        if not n % 50:
+            seed_check(conn, "store_osm", done=60 + int(20 * n / max(1, len(items))), total=100,
+                       msg="Joining routes into walks (%d of %d)…" % (n, len(items)))
+        chains = chain_segments([_line(ways[w]["pts"]) for w in r["ways"] if w in ways])
+        name = r["tags"].get("name") or r["tags"].get("ref") or "Unnamed route %d" % rid
+        wk = make_walk(rid, "osm-route", name, chains, r["tags"]) if chains else None
+        if not wk:
+            continue
+        wk["recipe"] = {"kind": "relation"}
+        bbox = _bbox_of(wk["chains"])
+        light = light_of(wk, wk["recipe"])
+        light["bb"] = list(bbox)
+        put(light, bbox, wk)
+        routes += 1
+
+    # 2. named footpaths: every way of one name that touches another becomes one walk
+    groups = {}
+    for wid, wy in ways.items():
+        t = wy["tags"]
+        name = ((t or {}).get("name") or "").strip()
+        if not name or name.lower() in GENERIC_NAMES:
+            continue
+        lats, lons = wy["pts"][0::2], wy["pts"][1::2]
+        groups.setdefault(name, []).append((wid, [min(lats), min(lons), max(lats), max(lons)]))
+    for n, (name, members) in enumerate(groups.items()):
+        if not n % 500:
+            seed_check(conn, "store_osm", done=80 + int(18 * n / max(1, len(groups))), total=100,
+                       msg="Joining footpaths into walks (%d of %d names)…" % (n, len(groups)))
+        for idxs in cluster_boxes([b for _, b in members]):
+            chains = chain_segments([_line(ways[members[i][0]]["pts"]) for i in idxs])
+            if not chains or sum(chain_length_m(c) for c in chains) / 1000.0 < MIN_PATH_KM:
                 continue
-            base = hit[0]
-            for other in hit[1:]:
-                base["rows"] += other["rows"]
-                base["s"], base["w"] = min(base["s"], other["s"]), min(base["w"], other["w"])
-                base["n"], base["e"] = max(base["n"], other["n"]), max(base["e"], other["e"])
-                clusters.remove(other)
-            base["rows"].append(r)
-            base["s"], base["w"], base["n"], base["e"] = min(base["s"], r["s"]), min(base["w"], r["w"]), max(base["n"], r["n"]), max(base["e"], r["e"])
-        for c in clusters:
-            if len(c["rows"]) < 2:
+            tags = {}
+            for i in idxs:
+                for k, v in ways[members[i][0]]["tags"].items():
+                    tags.setdefault(k, v)
+            lat0, lon0 = chains[0][0]
+            wid = PATH_BASE + zlib.crc32(("%s|%.2f|%.2f" % (name, lat0, lon0)).encode("utf-8"))
+            wk = make_walk(wid, "osm-path", name, chains, tags)
+            if not wk:
                 continue
-            first = json.loads(c["rows"][0]["light"])
-            first["distance_km"] = round(sum(json.loads(r["light"]).get("distance_km") or 0 for r in c["rows"]), 2)
-            first["lat"], first["lon"] = (c["s"] + c["n"]) / 2, (c["w"] + c["e"]) / 2
-            first["osm_id"] = PATH_BASE + zlib.crc32(("%s|%.2f|%.2f" % (first["name"], first["lat"], first["lon"])).encode("utf-8"))
-            first["recipe"] = {"kind": "path", "name": first["name"], "bbox": [c["s"], c["w"], c["n"], c["e"]]}
-            conn.executemany("DELETE FROM store WHERE osm_id=?", [(r["osm_id"],) for r in c["rows"]])
-            store_put(conn, first, (c["s"], c["w"], c["n"], c["e"]))
-            merged += len(c["rows"]) - 1
-        i = j
+            b, pad = _bbox_of(wk["chains"]), 0.002
+            box = [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad]
+            wk["recipe"] = {"kind": "path", "name": name, "bbox": box}
+            put(light_of(wk, wk["recipe"]), box, wk)
+            paths += 1
+        if n % 200 == 0:
+            conn.commit()
+
+    # 3. swap: the old OpenStreetMap rows stay in place and searchable until this moment
+    seed_check(conn, "store_osm", done=99, total=100, msg="Saving…")
     conn.commit()
-    return merged
+    conn.execute("DELETE FROM store WHERE source IN ('osm-route','osm-path')")
+    conn.execute("INSERT INTO store (osm_id, source, name, s, w, n, e, light, detail) "
+                 "SELECT osm_id, source, name, s, w, n, e, light, detail FROM store_osm_new")
+    conn.execute("DROP TABLE store_osm_new")
+    conn.execute("DELETE FROM seed_cells WHERE item='store_osm'")                  # everything in NZ is covered now
+    conn.executemany("INSERT OR IGNORE INTO seed_cells (item, cell) VALUES ('store_osm', ?)", [(cell_id(s, w),) for s, w in seed_cells()])
+    conn.commit()
+    return routes, paths
 
 
 def seed_osm(conn):
-    cells = seed_cells()
-    done_cells = {r["cell"] for r in conn.execute("SELECT cell FROM seed_cells WHERE item='store_osm'")}
-    seed_check(conn, "store_osm", len(done_cells), len(cells), "Starting near Auckland…")
-    refusals, skipped = Refusals(), []
-    for s, w in cells:
-        cid = cell_id(s, w)
-        if cid in done_cells:
-            continue
-        count, failed = _osm_cell(conn, s, w, s + SEED_CELL_DEG, w + SEED_CELL_DEG, refusals)
-        if failed:
-            skipped.append(cid)
-        else:
-            conn.execute("INSERT OR IGNORE INTO seed_cells (item, cell) VALUES ('store_osm', ?)", (cid,))
-            conn.commit()
-            done_cells.add(cid)
-        seed_check(conn, "store_osm", len(done_cells), len(cells),
-                   "%d of %d squares done%s (last square: %d walks)" % (len(done_cells), len(cells),
-                                                                        ", %d skipped (servers busy)" % len(skipped) if skipped else "", count))
-        if SEED_PAUSE:
-            time.sleep(SEED_PAUSE)
-    merged = merge_osm_paths(conn)
-    total = conn.execute("SELECT COUNT(*) FROM store WHERE source IN ('osm-route','osm-path')").fetchone()[0]
-    if skipped:
-        seed_set(conn, "store_osm", "error", len(done_cells), len(cells),
-                 "Stored %d walks. %d squares were refused by the busy servers; press Download to try them again (areas not stored still search live)."
-                 % (total, len(skipped)))
-        return
-    seed_set(conn, "store_osm", "done", len(cells), len(cells), "%d OpenStreetMap walks stored (%d joined across square edges)" % (total, merged))
+    path = extract_path()
+    if not os.path.exists(path):
+        raise RuntimeError('The raw OSM extract is not on disk (its download may have failed, see "Raw OSM extract"). Press Download again.')
+    seed_check(conn, "store_osm", 0, 100, "Opening the OSM file…")
+    scan = run_scan(conn, path)
+    try:
+        routes, paths = store_scan(conn, scan)
+    except BaseException:
+        conn.rollback()
+        conn.execute("DROP TABLE IF EXISTS store_osm_new")
+        conn.commit()
+        raise
+    seed_set(conn, "store_osm", "done", 100, 100,
+             "%d OpenStreetMap walks stored (%d routes, %d named paths) from a file %d days old"
+             % (routes + paths, routes, paths, int(extract_age_days() or 0)))
 
 
 def seed_extract(conn):
-    name = OSM_EXTRACT_URL.rstrip("/").rsplit("/", 1)[-1] or "extract.osm.pbf"
-    folder = os.path.join(DATA_DIR, "osm")
+    dest = extract_path()
+    folder, name = os.path.dirname(dest), os.path.basename(dest)
     os.makedirs(folder, exist_ok=True)
-    dest, part = os.path.join(folder, name), os.path.join(folder, name) + ".part"
-    if os.path.exists(dest):
+    part, meta = dest + ".part", dest + ".part.meta"
+    if os.path.exists(dest) and not extract_stale():
         size = os.path.getsize(dest)
-        seed_set(conn, "osm_extract", "done", size, size, "Already saved: %s (%.0f MB)" % (name, size / 1e6))
+        seed_set(conn, "osm_extract", "done", size, size,
+                 "Already saved: %s (%.0f MB, %d days old)" % (name, size / 1e6, int(extract_age_days() or 0)))
         return
+    # A stopped download carries on only if the server's file is still the same one (its ETag / date); otherwise it starts again.
     pos = os.path.getsize(part) if os.path.exists(part) else 0
+    validator = open(meta).read().strip() if pos and os.path.exists(meta) else ""
+    if pos and not validator:
+        pos = 0
     headers = {"User-Agent": USER_AGENT}
     if pos:
         headers["Range"] = "bytes=%d-" % pos
+        headers["If-Range"] = validator
     try:
         r = requests.get(OSM_EXTRACT_URL, headers=headers, stream=True, timeout=(20, 60))
     except requests.RequestException as ex:
@@ -2588,7 +2695,9 @@ def seed_extract(conn):
     if r.status_code not in (200, 206):
         raise RuntimeError("%s: HTTP %s" % (OSM_EXTRACT_URL.split("/")[2], r.status_code))
     if r.status_code == 200:
-        pos = 0                                                # the server ignored the resume request
+        pos = 0                                                # a new file, or the server ignored the resume request
+        with open(meta, "w") as fh:
+            fh.write(r.headers.get("ETag") or r.headers.get("Last-Modified") or "")
     total = pos + int(r.headers.get("Content-Length") or 0)
     free = shutil.disk_usage(folder).free
     if total and free < (total - pos) * 1.05:
@@ -2609,8 +2718,38 @@ def seed_extract(conn):
         raise RuntimeError("Download interrupted (%s). Press Download again to carry on from where it stopped." % _short_error(OSM_EXTRACT_URL, ex))
     if total and pos < total:
         raise RuntimeError("Download stopped early. Press Download again to carry on from where it stopped.")
-    os.replace(part, dest)
+    os.replace(part, dest)                                     # the new file replaces the old one only when it is complete
+    if os.path.exists(meta):
+        os.remove(meta)
     seed_set(conn, "osm_extract", "done", pos, pos, "Saved %s (%.0f MB) in the data folder" % (name, pos / 1e6))
+
+
+# --- monthly renewal -------------------------------------------------------------------------------------
+def refresh_due(conn):
+    """True when the OpenStreetMap store is older than OSM_REFRESH_DAYS (and a renewal was not tried in the last day)."""
+    if OSM_REFRESH_DAYS <= 0:
+        return False
+    row = conn.execute("SELECT status, finished FROM seed_state WHERE item='store_osm'").fetchone()
+    if not row or row["status"] != "done" or not row["finished"]:
+        return False
+    if time.time() - row["finished"] < OSM_REFRESH_DAYS * 86400:
+        return False
+    tried = conn.execute("SELECT updated FROM seed_state WHERE item='osm_refresh'").fetchone()
+    return not (tried and time.time() - tried["updated"] < 86400)
+
+
+def refresh_start(conn):
+    """Fetch a fresh file; when it has arrived the store is rebuilt from it (see _seed_loop). The old data keeps serving meanwhile."""
+    seed_set(conn, "osm_refresh", "pending", msg="Monthly renewal of the OpenStreetMap data")
+    seed_queue(conn, ["osm_extract"])
+
+
+def refresh_after_extract(conn):
+    if seed_status(conn, "osm_refresh") != "pending":
+        return
+    if seed_status(conn, "osm_extract") == "done":
+        seed_queue(conn, ["store_osm"])
+    seed_set(conn, "osm_refresh", "idle", msg="Last tried %s" % time.strftime("%Y-%m-%d"))
 
 
 SEED_FUNCS = {"store_doc": seed_doc, "store_nz": seed_nz, "store_osm": seed_osm, "osm_extract": seed_extract}
@@ -2629,6 +2768,9 @@ def seed_run_one(conn, item):
 
 def seed_queue(conn, items):
     queued = []
+    items = set(items)
+    if "store_osm" in items and not os.path.exists(extract_path()):
+        items.add("osm_extract")                                  # the store is built from this file
     for item in SEED_RUN_ORDER:
         if item in items and seed_status(conn, item) not in ("queued", "running", "cancelling"):
             seed_set(conn, item, "queued", done=0, total=0, msg="Waiting in line…")
@@ -2663,6 +2805,11 @@ def _seed_loop():
             item = seed_next(conn)
             if item:
                 seed_run_one(conn, item)
+                if item == "osm_extract":
+                    refresh_after_extract(conn)
+            elif refresh_due(conn):
+                refresh_start(conn)
+                item = "refresh"
             conn.close()
             if not item:
                 time.sleep(5)
@@ -2776,7 +2923,7 @@ def service_status(item):
             pass
         return {"status": "running", "msg": "The container is downloading the map and building tiles" + extra + ". Watch its log for detail."}
     if not OVERPASS_LOCAL_URL:
-        return {"status": "off", "msg": "Not set up (no OVERPASS_LOCAL_URL; add the walkbox-overpass service from the compose file)."}
+        return {"status": "off", "msg": "Not set up (OVERPASS_LOCAL_URL is blank; Walkbox no longer needs its own Overpass)."}
     size = folder_size(OVERPASS_DIR)
     extra = " (%.1f GB on disk so far)" % (size / 1e9) if size else ""
     _local_ok["ts"] = 0
@@ -2789,6 +2936,8 @@ def seed_overview(conn):
     rows = {r["item"]: dict(r) for r in conn.execute("SELECT * FROM seed_state")}
     items = []
     for item in SEED_SHOW_ORDER:
+        if item == "overpass_db" and not OVERPASS_LOCAL_URL:
+            continue
         label, note = SEED_LABELS[item]
         d = {"id": item, "label": label, "note": note, "service": item in SEED_SERVICES,
              "status": "idle", "done": 0, "total": 0, "msg": ""}
@@ -2797,6 +2946,9 @@ def seed_overview(conn):
         elif item in rows:
             r = rows[item]
             d.update(status=r["status"], done=r["done"] or 0, total=r["total"] or 0, msg=r["msg"] or "")
+            if item == "store_osm" and r["status"] == "done" and r["finished"] and OSM_REFRESH_DAYS > 0:
+                due = time.strftime("%d %b %Y", time.localtime(r["finished"] + OSM_REFRESH_DAYS * 86400))
+                d["msg"] = "%s. Renews itself around %s." % (d["msg"].rstrip("."), due)
         items.append(d)
     return items
 
@@ -2860,8 +3012,8 @@ def find_by_name(tokens, sources):
         rows = conn.execute("SELECT light FROM store WHERE source IN (%s) AND %s LIMIT ?" % (",".join("?" * len(kinds)), like),
                             kinds + ["%" + tok + "%" for tok in tokens] + [FIND_LIMIT * 3]).fetchall()
         walks += [json.loads(r["light"]) for r in rows]
-    if ("routes" in sources or "paths" in sources) and seed_status(conn, "store_osm") != "done":
-        notes.append("OpenStreetMap walks can be searched by name once their download on the Data tab has finished.")
+    if ("routes" in sources or "paths" in sources) and not conn.execute("SELECT 1 FROM seed_cells WHERE item='store_osm' LIMIT 1").fetchone():
+        notes.append("OpenStreetMap walks can be searched by name once their download on the Data tab has finished.")   # never built yet; a monthly renewal keeps the old walks searchable
     if "doc" in sources and not store_done("store_doc"):
         try:
             data = _arcgis_get(DOC_URL, {

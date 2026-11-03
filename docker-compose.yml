@@ -1,28 +1,52 @@
+# Walkbox. Every setting is read from the .env file that sits next to this file (see .env.example).
+# Nothing secret belongs in this file, so it is safe to keep in the repository.
 services:
   walkbox:
     # Image is built automatically by GitHub Actions on every push to main.
     image: ghcr.io/deepakgaur84/walkbox:latest
     container_name: walkbox
     volumes:
-      # Holds walkbox.db and the downloaded NZ files. Must exist before deploy.
-      - /volume1/docker/walkbox/data:/data
-      # Read-only views of the two big builds, only so the Data tab can show how large they are so far.
-      - /volume1/docker/walkbox/valhalla:/valhalla:ro
-      - /volume1/docker/walkbox/overpass:/overpass:ro
+      # Holds walkbox.db, the downloaded NZ file and the OpenStreetMap store. Must exist before deploy.
+      - ${WALKBOX_DIR:-/volume1/docker/walkbox}/data:/data
+      # Read-only view of the routing tiles, only so the Data tab can show how large they are so far.
+      - ${WALKBOX_DIR:-/volume1/docker/walkbox}/valhalla:/valhalla:ro
     environment:
       DB_PATH: /data/walkbox.db
-      MAX_SPAN_DEG: "0.5"
-      MAX_RESULTS: "150"
-      # Turn-by-turn routing engine below (container name and internal port).
-      VALHALLA_URL: http://walkbox-valhalla:8002
-      # Own Overpass server (below). Walkbox asks it first once it is ready, and the public servers otherwise.
-      OVERPASS_LOCAL_URL: http://walkbox-overpass/api/interpreter
-      # First start queues the one-off NZ downloads (set to "0" to start them yourself from the Data tab).
-      SEED_AUTOSTART: "1"
-      # Optional: a free key from carto.com/basemaps/apikey gives the cleaner CARTO street map (OpenStreetMap tiles are used when blank).
-      # Set CARTO_KEY in the stack's environment variables in Dockhand; do not write the key into this file.
-      CARTO_KEY: ${CARTO_KEY:-}
-    # Public DNS so the container can reach the OpenStreetMap servers.
+      # --- Map look
+      CARTO_KEY: "${CARTO_KEY:-}"
+      # --- NZ downloads
+      SEED_AUTOSTART: "${SEED_AUTOSTART:-1}"
+      OSM_EXTRACT_URL: "${OSM_EXTRACT_URL:-https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf}"
+      OSM_REFRESH_DAYS: "${OSM_REFRESH_DAYS:-30}"
+      SEED_CELL_DEG: "${SEED_CELL_DEG:-0.5}"
+      SEED_PAUSE_SECONDS: "${SEED_PAUSE_SECONDS:-0.3}"
+      # --- What counts as a walk
+      MIN_PATH_KM: "${MIN_PATH_KM:-0.8}"
+      MIN_TRACK_KM: "${MIN_TRACK_KM:-0.3}"
+      ROUTE_TYPES: "${ROUTE_TYPES:-hiking|foot|walking}"
+      PATH_HIGHWAYS: "${PATH_HIGHWAYS:-footway|path|track|pedestrian}"
+      MAX_PATH_WAYS: "${MAX_PATH_WAYS:-2500}"
+      # --- Searching
+      MAX_SPAN_DEG: "${MAX_SPAN_DEG:-0.5}"
+      MAX_RESULTS: "${MAX_RESULTS:-150}"
+      SEARCH_CACHE_SECONDS: "${SEARCH_CACHE_SECONDS:-21600}"
+      # --- Import and photos
+      MAX_IMPORT_MB: "${MAX_IMPORT_MB:-15}"
+      PHOTOS_PER_MINUTE: "${PHOTOS_PER_MINUTE:-30}"
+      # --- Live OpenStreetMap servers
+      OVERPASS_URLS: "${OVERPASS_URLS:-https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter}"
+      OVERPASS_HEDGE_SECONDS: "${OVERPASS_HEDGE_SECONDS:-6}"
+      OVERPASS_TIMEOUT: "${OVERPASS_TIMEOUT:-30}"
+      OVERPASS_LOCAL_URL: "${OVERPASS_LOCAL_URL:-}"
+      # --- Other services
+      VALHALLA_URL: "${VALHALLA_URL:-http://walkbox-valhalla:8002}"
+      WEATHER_URL: "${WEATHER_URL:-https://api.open-meteo.com/v1/forecast}"
+      ELEVATION_URL: "${ELEVATION_URL:-https://api.open-meteo.com/v1/elevation}"
+      COMMONS_URL: "${COMMONS_URL:-https://commons.wikimedia.org/w/api.php}"
+      DOC_URL: "${DOC_URL:-https://services1.arcgis.com/3JjYDyG3oajxU6HO/ArcGIS/rest/services/DOC_Walking_Experiences/FeatureServer/1/query}"
+      NZT_URL: "${NZT_URL:-https://services2.arcgis.com/b5ADKIcWivL5vNaV/ArcGIS/rest/services/National_Tracks_Dataset_Pilot/FeatureServer/0/query}"
+      USER_AGENT: "${USER_AGENT:-walkbox/1.1 (self-hosted walk library)}"
+    # Public DNS so the container can reach the OpenStreetMap and Geofabrik servers.
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -37,34 +61,10 @@ services:
     container_name: walkbox-valhalla
     volumes:
       # Holds the downloaded map and built routing tiles. Must exist before deploy.
-      - /volume1/docker/walkbox/valhalla:/custom_files
+      - ${WALKBOX_DIR:-/volume1/docker/walkbox}/valhalla:/custom_files
     environment:
-      tile_urls: https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf
-      server_threads: "2"
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    networks:
-      - proxynet
-    restart: unless-stopped
-
-  walkbox-overpass:
-    # Your own OpenStreetMap query server for NZ, so searches never wait on the busy public ones.
-    # First start downloads NZ and imports it (a few GB, can take hours); watch the container log.
-    image: wiktorn/overpass-api:latest
-    container_name: walkbox-overpass
-    volumes:
-      # Holds the imported database. Must exist before deploy.
-      - /volume1/docker/walkbox/overpass:/db
-    environment:
-      OVERPASS_MODE: init
-      OVERPASS_META: "no"
-      # Geofabrik only publishes .pbf, so it is converted to the format Overpass imports (done by the image).
-      OVERPASS_PLANET_URL: https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf
-      OVERPASS_PLANET_PREPROCESS: "mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf"
-      OVERPASS_DIFF_URL: https://download.geofabrik.de/australia-oceania/new-zealand-updates/
-      OVERPASS_RULES_LOAD: "10"
-      OVERPASS_STOP_AFTER_INIT: "false"
+      tile_urls: "${OSM_EXTRACT_URL:-https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf}"
+      server_threads: "${VALHALLA_THREADS:-2}"
     dns:
       - 1.1.1.1
       - 8.8.8.8

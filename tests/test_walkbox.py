@@ -927,12 +927,11 @@ def seed_fake_post(url, params, label, tries=3):
 wb._arcgis_post = seed_fake_post
 conn = wb.raw_db()
 
-# Nothing is downloaded yet: the Data tab lists all six items, the two services report on themselves
+# Nothing is downloaded yet: the Data tab lists the items; the Overpass row only appears when you run your own Overpass
 ov = c.get("/api/seed").get_json()
-assert [i["id"] for i in ov["items"]] == ["osm_extract", "valhalla", "overpass_db", "store_osm", "store_doc", "store_nz"], ov
+assert [i["id"] for i in ov["items"]] == ["osm_extract", "valhalla", "store_osm", "store_doc", "store_nz"], ov
 assert all(i["status"] == "idle" for i in ov["items"] if not i["service"]) and ov["busy"] is False
-assert {i["id"] for i in ov["items"] if i["service"]} == {"valhalla", "overpass_db"}
-assert [i for i in ov["items"] if i["id"] == "overpass_db"][0]["status"] == "off"                        # no OVERPASS_LOCAL_URL yet
+assert {i["id"] for i in ov["items"] if i["service"]} == {"valhalla"}
 
 # Queueing: runnable items wait in line in a fixed order, the two services are ignored
 q = c.post("/api/seed", json={"items": ["osm_extract", "valhalla", "store_doc", "store_osm", "bogus"]}).get_json()
@@ -958,15 +957,74 @@ nzk = conn.execute("SELECT * FROM store WHERE source='nz-track' AND name='Takapu
 assert nzk["osm_id"] == wb.nz_light_id("Takapuna Beach Walkway", "Auckland Council") and len(json.loads(nzk["detail"])["chains"]) >= 1
 assert conn.execute("SELECT COUNT(*) FROM store WHERE name='Bit of Path'").fetchone()[0] == 0              # too short, like the live list
 
-# OpenStreetMap walks: stored square by square; a square is usable as soon as it is done
+# OpenStreetMap walks: built from the downloaded NZ file (a small made-up one here), no map server involved
+import osmium as _osmium
+
+def make_pbf(path, extra=False):
+    """A tiny .osm.pbf: Takapuna Beach Walkway and Rocky Headland Track as footway ways, a route relation, things that must be left out."""
+    if os.path.exists(path): os.remove(path)
+    wr = _osmium.SimpleWriter(path)
+    ids = {}
+    def nd(lat, lon):
+        key = (round(lat, 6), round(lon, 6))
+        if key not in ids:
+            ids[key] = len(ids) + 1
+            wr.add_node(_osmium.osm.mutable.Node(id=ids[key], location=(lon, lat)))
+        return ids[key]
+    allways = []                                                                  # (id, tags, [(lat, lon), ...])
+    for wid, name, geom in WAYS:
+        allways.append((wid, {"highway": "footway", "name": name}, [(p["lat"], p["lon"]) for p in geom]))
+    for rid, members in REL_MEMBERS.items():
+        for k, m in enumerate(members):
+            allways.append((rid * 10 + k, {"highway": "service"}, [(p["lat"], p["lon"]) for p in m["geometry"]]))
+    allways.append((50, {"highway": "path", "name": "Secret Path", "access": "private"}, [(-36.9, 174.7), (-36.9, 174.72)]))
+    allways.append((51, {"highway": "path", "name": "Ghost Walk"}, [(-36.95, 174.7), (-36.95 - 0.02, 174.7), (-36.95 - 0.04, 174.7)]))
+    if extra:
+        allways.append((60, {"highway": "path", "name": "Fresh Walk"}, [(-36.7, 174.7), (-36.71, 174.7), (-36.72, 174.7)]))
+    nodes = {wid: [nd(la, lo) for la, lo in pts] for wid, _, pts in sorted(allways)}
+    # a point that exists on no node: outside the extract
+    for wid, tags, pts in sorted(allways):
+        wr.add_way(_osmium.osm.mutable.Way(id=wid, nodes=nodes[wid] + ([987654321] if wid == 51 else []), tags=tags))
+    for rid in sorted(REL_MEMBERS):
+        wr.add_relation(_osmium.osm.mutable.Relation(id=rid, members=[("w", rid * 10 + k, "") for k in range(len(REL_MEMBERS[rid]))],
+                                                      tags=dict(REL_TAGS[rid], type="route")))
+    wr.add_relation(_osmium.osm.mutable.Relation(id=333, members=[("w", 1, "")], tags={"type": "route", "route": "bicycle", "name": "A Bike Route"}))
+    wr.close()
+
+tmp = tempfile.mkdtemp(); wb.DATA_DIR = tmp; wb.OSM_EXTRACT_URL = "https://download.example/nz/new-zealand-latest.osm.pbf"
+dest = os.path.join(tmp, "osm", "new-zealand-latest.osm.pbf")
+os.makedirs(os.path.dirname(dest))
 wb.seed_cells = lambda: [(-37.0, 174.5), (-37.0, 175.0)]
-wb.overpass = fake_overpass
+wb.overpass = nope = lambda *a, **k: (_ for _ in ()).throw(AssertionError("went to the internet"))
+# no extract yet: the store says what is missing instead of failing mysteriously, and ticking it brings the file into the queue
 wb.seed_run_one(conn, "store_osm")
 ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
-assert ov["store_osm"]["status"] == "done" and ov["store_osm"]["total"] == 2, ov["store_osm"]
+assert ov["store_osm"]["status"] == "error" and "not on disk" in ov["store_osm"]["msg"], ov["store_osm"]
+conn.execute("DELETE FROM seed_state WHERE item IN ('store_osm','osm_extract')"); conn.commit()
+assert wb.seed_queue(conn, ["store_osm"]) == ["osm_extract", "store_osm"]
+conn.execute("DELETE FROM seed_state WHERE item IN ('store_osm','osm_extract')"); conn.commit()
+# a broken file (not an OSM file at all) is reported plainly and nothing is half-written
+open(dest, "wb").write(b"this is not an osm file")
+wb.seed_run_one(conn, "store_osm")
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["store_osm"]["status"] == "error" and "failed" in ov["store_osm"]["msg"], ov["store_osm"]
+assert conn.execute("SELECT COUNT(*) FROM store WHERE source IN ('osm-route','osm-path')").fetchone()[0] == 0
+assert not [r for r in conn.execute("SELECT name FROM sqlite_master WHERE name='store_osm_new'")]
+make_pbf(dest)
+wb.seed_run_one(conn, "store_osm")
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["store_osm"]["status"] == "done" and "OpenStreetMap walks stored" in ov["store_osm"]["msg"] and "Renews itself" in ov["store_osm"]["msg"], ov["store_osm"]
 assert conn.execute("SELECT COUNT(*) FROM seed_cells WHERE item='store_osm'").fetchone()[0] == 2
-assert conn.execute("SELECT COUNT(*) FROM store WHERE source='osm-path' AND name='Rocky Headland Track'").fetchone()[0] == 1   # not stored twice
-assert conn.execute("SELECT COUNT(*) FROM store WHERE source='osm-route' AND osm_id=111").fetchone()[0] == 1
+rows = {r["name"]: r for r in conn.execute("SELECT * FROM store WHERE source IN ('osm-route','osm-path')")}
+assert set(rows) == {"Takapuna Beach Walkway", "Rocky Headland Track", "Test Loop & Ridge", "Unnamed route 222", "Ghost Walk"}, set(rows)
+assert rows["Rocky Headland Track"]["source"] == "osm-path" and rows["Test Loop & Ridge"]["osm_id"] == 111 and rows["Test Loop & Ridge"]["source"] == "osm-route"
+for gone in ("Tiny Alley", "Footpath", "Secret Path", "A Bike Route"):                   # too short / generic name / private / a bike route
+    assert gone not in rows, gone
+det = json.loads(rows["Test Loop & Ridge"]["detail"])                                      # the route is stored with its line
+assert det["chains"] and det["distance_km"] > 2 and det["recipe"] == {"kind": "relation"} and det["difficulty"] == "Moderate", det
+assert abs(json.loads(rows["Rocky Headland Track"]["light"])["distance_km"] - 1.34) < 0.05, json.loads(rows["Rocky Headland Track"]["light"])
+assert json.loads(rows["Ghost Walk"]["detail"])["distance_km"] > 4                          # a node outside the file is skipped, the rest kept
+rk = json.loads(rows["Rocky Headland Track"]["detail"]); assert len(rk["chains"]) == 1 and rk["recipe"]["kind"] == "path"
 
 # Searching now needs no map server and no ArcGIS at all
 def nope(*a, **k): raise AssertionError("went to the internet")
@@ -990,76 +1048,86 @@ d = c.post("/api/detail", json={"id": did}).get_json()
 assert d["line"] and d["name"] == "Takapuna Beach Walkway", d
 wb.requests.get, wb._arcgis_get, wb.overpass = fake_get, real_arcgis_get, fake_overpass
 
-# Paths cut by the edge of two squares are joined
-conn.execute("DELETE FROM store"); conn.commit()
-for a, b, sw in ((-36.51, -36.50, "x"), (-36.50, -36.49, "y")):
-    lt = wb.make_light(wb.PATH_BASE + (1 if sw == "x" else 2), "osm-path", "Edge Walk", {"kind": "path", "name": "Edge Walk", "bbox": [a, 174.5, b, 174.51]}, {}, 0.7, True, ((a + b) / 2, 174.505))
-    wb.store_put(conn, lt, (a, 174.5, b, 174.51))
-wb.store_put(conn, wb.make_light(wb.PATH_BASE + 3, "osm-path", "Far Walk", {"kind": "path", "name": "Far Walk", "bbox": [-40, 170, -39.9, 170.1]}, {}, 0.9, True, (-39.95, 170.05)), (-40, 170, -39.9, 170.1))
-conn.commit()
-assert wb.merge_osm_paths(conn) == 1
-edge = [json.loads(r["light"]) for r in conn.execute("SELECT light FROM store WHERE name='Edge Walk'")]
-assert len(edge) == 1 and abs(edge[0]["distance_km"] - 1.4) < 0.01 and edge[0]["recipe"]["bbox"][0] == -36.51 and edge[0]["recipe"]["bbox"][2] == -36.49, edge
-assert conn.execute("SELECT COUNT(*) FROM store WHERE name='Far Walk'").fetchone()[0] == 1
-
-# A square the server refuses is tried twice, then cut in four; a square that stays refused is skipped, not fatal
-tries = []
-def pickyop(q, lane=None):
-    m = _re.search(r"bbox:([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)", q); tries.append(float(m.group(3)) - float(m.group(1)))
-    if float(m.group(3)) - float(m.group(1)) > 0.3: raise RuntimeError("server too busy")
-    return {"elements": []}
-wb.overpass = pickyop
-assert wb._osm_cell(conn, -37.0, 174.5, -36.5, 175.0, wb.Refusals()) == (0, []) and tries == [0.5, 0.5, 0.25, 0.25, 0.25, 0.25], tries
-def stubborn(q, lane=None):                                      # the first square is always refused, the second is fine
-    m = _re.search(r"bbox:([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)", q)
-    if float(m.group(1)) < -36.4 and float(m.group(1)) >= -37.0 and float(m.group(2)) < 175.0: raise RuntimeError("HTTP 504")
-    return fake_overpass(q, lane)
-wb.overpass = stubborn
-wb.seed_cells = lambda: [(-37.0, 174.5), (-38.0, 175.0)]; conn.execute("DELETE FROM seed_cells"); conn.commit()
-saved_cfg = (wb.SEED_MAX_SPLIT, wb.SEED_GIVE_UP_AFTER); wb.SEED_MAX_SPLIT, wb.SEED_GIVE_UP_AFTER = 1, 1000
-wb.seed_run_one(conn, "store_osm")
-ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
-assert ov["store_osm"]["status"] == "error" and "1 squares were refused" in ov["store_osm"]["msg"] and "try them again" in ov["store_osm"]["msg"], ov["store_osm"]
-assert [r["cell"] for r in conn.execute("SELECT cell FROM seed_cells")] == ["-38.000,175.000"]                    # the good square was kept
-wb.overpass = fake_overpass; wb.seed_run_one(conn, "store_osm")                                                  # pressing Download again fetches only what is missing
-assert c.get("/api/seed").get_json()["items"][3]["status"] == "done" and conn.execute("SELECT COUNT(*) FROM seed_cells").fetchone()[0] == 2
-wb.SEED_MAX_SPLIT, wb.SEED_GIVE_UP_AFTER = saved_cfg
-# servers that answer nothing at all stop the job quickly with a clear message
-wb.overpass = lambda q, lane=None: (_ for _ in ()).throw(RuntimeError("overpass-api.de: HTTP 504"))
-conn.execute("DELETE FROM seed_cells"); conn.commit()
-wb.seed_run_one(conn, "store_osm")
-ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
-assert ov["store_osm"]["status"] == "error" and "keep refusing" in ov["store_osm"]["msg"] and "HTTP 504" in ov["store_osm"]["msg"], ov["store_osm"]
-wb.overpass = fake_overpass
-
-# Raw OSM extract: streamed to the data folder, and a stopped download carries on instead of starting again
+# Raw OSM extract: streamed to the data folder; a stopped download carries on only if the server's file is still the same one
 class Stream:
-    def __init__(self, body, code=200, total=None): self.body, self.status_code = body, code; self.headers = {"Content-Length": str(len(body))}
+    def __init__(self, body, code=200, etag="etag-1"):
+        self.body, self.status_code = body, code; self.headers = {"Content-Length": str(len(body)), "ETag": etag}
     def iter_content(self, n):
-        for i in range(0, len(self.body), 4): yield self.body[i:i + 4]
-BLOB = b"0123456789abcdefghij" * 3
+        for i in range(0, len(self.body), 4096): yield self.body[i:i + 4096]
+BLOB = open(dest, "rb").read()                                                             # a real (tiny) OSM file, so the same bytes can feed the store build
+server = {"body": BLOB, "etag": "etag-1"}
 sent = []
 def blob_get(url, headers=None, **kw):
-    sent.append(dict(headers or {}))
-    rng = (headers or {}).get("Range")
-    if rng:
-        start = int(rng.split("=")[1].rstrip("-")); return Stream(BLOB[start:], 206)
-    return Stream(BLOB)
-tmp = tempfile.mkdtemp(); wb.DATA_DIR = tmp; wb.OSM_EXTRACT_URL = "https://download.example/nz/new-zealand-latest.osm.pbf"
+    headers = headers or {}
+    if url == wb.OSM_EXTRACT_URL: sent.append(dict(headers))            # (the Data tab also asks Valhalla how it is doing)
+    rng = headers.get("Range")
+    if rng and headers.get("If-Range") == server["etag"]:                                  # same file: the rest of it
+        start = int(rng.split("=")[1].rstrip("-")); return Stream(server["body"][start:], 206, server["etag"])
+    return Stream(server["body"], 200, server["etag"])                                     # no range, or the file changed: all of it
 wb.requests.get = blob_get
+_shutil.rmtree(os.path.join(tmp, "osm")); os.makedirs(os.path.join(tmp, "osm"))
+conn.execute("DELETE FROM seed_state WHERE item='osm_extract'"); conn.commit()
 wb.seed_run_one(conn, "osm_extract")
-dest = os.path.join(tmp, "osm", "new-zealand-latest.osm.pbf")
-assert open(dest, "rb").read() == BLOB and not os.path.exists(dest + ".part") and "Range" not in sent[0]
+assert open(dest, "rb").read() == BLOB and not os.path.exists(dest + ".part") and not os.path.exists(dest + ".part.meta") and "Range" not in sent[0]
 ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
 assert ov["osm_extract"]["status"] == "done" and ov["osm_extract"]["done"] == len(BLOB), ov["osm_extract"]
-os.remove(dest); open(dest + ".part", "wb").write(BLOB[:24]); sent.clear()
+# stopped half way, same file on the server: carries on from the byte it reached
+os.remove(dest); open(dest + ".part", "wb").write(BLOB[:24]); open(dest + ".part.meta", "w").write("etag-1"); sent.clear()
 wb.seed_run_one(conn, "osm_extract")
-assert open(dest, "rb").read() == BLOB and sent[0]["Range"] == "bytes=24-"                                   # resumed from byte 24
+assert open(dest, "rb").read() == BLOB and sent[0]["Range"] == "bytes=24-" and sent[0]["If-Range"] == "etag-1"
+# stopped half way, but the server's file has changed since: starts again instead of gluing two different files together
+os.remove(dest); open(dest + ".part", "wb").write(b"OLD" * 8); open(dest + ".part.meta", "w").write("etag-OLD"); sent.clear()
 wb.seed_run_one(conn, "osm_extract")
-assert "Already saved" in c.get("/api/seed").get_json()["items"][0]["msg"]
+assert open(dest, "rb").read() == BLOB, "mixed two files"
+# a leftover part file with no record of which file it came from is not trusted
+os.remove(dest); open(dest + ".part", "wb").write(b"???"); sent.clear()
+wb.seed_run_one(conn, "osm_extract")
+assert open(dest, "rb").read() == BLOB and "Range" not in sent[0]
+wb.seed_run_one(conn, "osm_extract")
+assert "Already saved" in c.get("/api/seed").get_json()["items"][0]["msg"] and len(sent) == 1                  # fresh file: nothing downloaded again
 wb.requests.get = lambda url, **kw: Stream(b"", 404)
 os.remove(dest); wb.seed_run_one(conn, "osm_extract")
 assert c.get("/api/seed").get_json()["items"][0]["status"] == "error"
+wb.requests.get = fake_get; open(dest, "wb").write(BLOB)
+
+# --- monthly renewal of the OpenStreetMap data
+import time; DAY = 86400
+def age_files(days):
+    old = time.time() - days * DAY
+    os.utime(dest, (old, old))
+    conn.execute("UPDATE seed_state SET finished=? WHERE item='store_osm'", (old,)); conn.commit()
+wb.seed_run_one(conn, "store_osm")                                                          # a fresh store built from the file
+assert wb.OSM_REFRESH_DAYS == 30 and not wb.refresh_due(conn)                                # just built: not due
+age_files(29); assert not wb.refresh_due(conn) and not wb.extract_stale()
+age_files(31); assert wb.refresh_due(conn) and wb.extract_stale()                           # older than a month: due
+wb.OSM_REFRESH_DAYS = 0; assert not wb.refresh_due(conn) and not wb.extract_stale(); wb.OSM_REFRESH_DAYS = 30   # 0 switches it off
+conn.execute("UPDATE seed_state SET status='running' WHERE item='store_osm'"); conn.commit()
+assert not wb.refresh_due(conn)                                                             # not while it is being built
+conn.execute("UPDATE seed_state SET status='done' WHERE item='store_osm'"); conn.commit()
+# the renewal: a new file arrives (this time with one more path in it), then the store is rebuilt from it; searches keep working throughout
+make_pbf(dest + ".new.osm.pbf", extra=True); server["body"] = open(dest + ".new.osm.pbf", "rb").read(); server["etag"] = "etag-2"; os.remove(dest + ".new.osm.pbf")
+sent.clear(); wb.requests.get = blob_get
+old_ids = {r["osm_id"] for r in conn.execute("SELECT osm_id FROM store WHERE source IN ('osm-route','osm-path')")}
+wb.refresh_start(conn)
+assert wb.seed_status(conn, "osm_extract") == "queued" and wb.seed_status(conn, "osm_refresh") == "pending" and wb.seed_status(conn, "store_osm") == "done"
+assert wb.seed_next(conn) == "osm_extract"
+wb.seed_run_one(conn, "osm_extract"); wb.refresh_after_extract(conn)
+assert open(dest, "rb").read() == server["body"] and not wb.extract_stale()                  # the new file replaced the old one
+assert wb.seed_status(conn, "store_osm") == "queued" and wb.seed_status(conn, "osm_refresh") == "idle"
+assert {r["osm_id"] for r in conn.execute("SELECT osm_id FROM store WHERE source IN ('osm-route','osm-path')")} == old_ids   # still the old walks until the rebuild ends
+assert not wb.refresh_due(conn)
+wb.seed_run_one(conn, "store_osm")
+names = {r["name"] for r in conn.execute("SELECT name FROM store WHERE source IN ('osm-route','osm-path')")}
+assert "Fresh Walk" in names and "Rocky Headland Track" in names, names
+assert wb.seed_status(conn, "store_osm") == "done" and not wb.refresh_due(conn) and not wb.extract_stale()
+# a renewal whose download fails keeps the old store, and is not tried again for a day
+age_files(40); wb.requests.get = lambda url, **kw: Stream(b"", 503)
+wb.refresh_start(conn); wb.seed_run_one(conn, "osm_extract"); wb.refresh_after_extract(conn)
+assert wb.seed_status(conn, "osm_extract") == "error" and wb.seed_status(conn, "store_osm") == "done" and wb.seed_status(conn, "osm_refresh") == "idle"
+assert not wb.refresh_due(conn)                                                             # retried tomorrow, not in a loop
+conn.execute("UPDATE seed_state SET updated=? WHERE item='osm_refresh'", (time.time() - 2 * DAY,)); conn.commit()
+assert wb.refresh_due(conn)
+assert "Fresh Walk" in {r["name"] for r in conn.execute("SELECT name FROM store WHERE source='osm-path'")}   # the old walks were never lost
 wb.requests.get = fake_get
 
 # The two self-building services report their state; once Overpass answers, Walkbox asks it first
@@ -1085,7 +1153,7 @@ wb.seed_startup(c2)
 assert [wb.seed_status(c2, i) for i in wb.SEED_RUN_ORDER] == ["queued"] * 4
 wb.seed_set(c2, "store_nz", "running", msg="x"); wb.seed_set(c2, "store_doc", "done"); wb.seed_set(c2, "store_osm", "cancelled"); wb.seed_set(c2, "osm_extract", "error")
 wb.seed_startup(c2)
-assert [wb.seed_status(c2, i) for i in wb.SEED_RUN_ORDER] == ["done", "queued", "cancelled", "error"]
+assert [wb.seed_status(c2, i) for i in wb.SEED_RUN_ORDER] == ["done", "queued", "error", "cancelled"]
 c2.execute("DELETE FROM seed_state"); c2.commit(); os.environ["SEED_AUTOSTART"] = "0"; wb.seed_startup(c2)
 assert c2.execute("SELECT COUNT(*) FROM seed_state").fetchone()[0] == 0                                    # switched off by SEED_AUTOSTART=0
 os.environ["SEED_AUTOSTART"] = "1"
@@ -1107,8 +1175,18 @@ r = c.post("/api/find", json={"q": "Takapuna  beach", "sources": ["doc", "nz"]})
 assert [x["name"] for x in r["results"]] == ["Takapuna Beach Walkway"] and r["results"][0]["source"] == "nz-track", r   # every word must match, in any order
 nzl = wb._cache[r["results"][0]["osm_id"]]
 assert nzl["recipe"]["authority"] == "Auckland Council" and nzl["recipe"]["bbox"] == [-48.0, 166.0, -34.0, 179.5], nzl["recipe"]
-r = c.post("/api/find", json={"q": "edge", "sources": ["paths", "routes"]}).get_json()
-assert [x["name"] for x in r["results"]] == ["Edge Walk"] and any("Data tab" in n for n in r["notes"]), r        # OpenStreetMap walks come from the download
+wb.seed_set(conn, "store_osm", "done")
+r = c.post("/api/find", json={"q": "rocky headland", "sources": ["paths", "routes"]}).get_json()
+assert [x["name"] for x in r["results"]] == ["Rocky Headland Track"] and not any("Data tab" in n for n in r["notes"]), r   # OpenStreetMap walks come from the built store
+conn.execute("UPDATE seed_state SET status='running' WHERE item='store_osm'"); conn.commit()                    # a monthly rebuild is under way: the old walks are still found
+r = c.post("/api/find", json={"q": "rocky headland", "sources": ["paths", "routes"]}).get_json()
+assert [x["name"] for x in r["results"]] == ["Rocky Headland Track"] and not r["notes"], r
+conn.execute("UPDATE seed_state SET status='done' WHERE item='store_osm'"); conn.commit()
+keep_cells = [r_["cell"] for r_ in conn.execute("SELECT cell FROM seed_cells WHERE item='store_osm'")]
+conn.execute("DELETE FROM seed_cells WHERE item='store_osm'"); conn.commit()                                    # never built at all: tell the person where to start
+r = c.post("/api/find", json={"q": "zzzz", "sources": ["paths"]}).get_json()
+assert r["results"] == [] and any("Data tab" in n for n in r["notes"]), r
+conn.executemany("INSERT INTO seed_cells (item, cell) VALUES ('store_osm', ?)", [(x,) for x in keep_cells]); conn.commit()
 assert c.post("/api/find", json={"q": "zzzz", "sources": ["doc", "nz", "paths"]}).get_json()["results"] == []
 assert c.post("/api/find", json={"q": "a"}).status_code == 400 and c.post("/api/find", json={"q": "!!"}).status_code == 400
 assert c.post("/api/find", json={"q": "kauri", "sources": ["bogus"]}).status_code == 400

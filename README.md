@@ -153,9 +153,14 @@ The NAS only pulls that image, so no code folder and no `git` on the NAS are nee
 
 1. One time, GitHub: after the first build finishes (repo > Actions tab shows a green tick), open your profile > Packages > `walkbox` >
    Package settings > Change visibility > Public. This lets the NAS pull it without a login.
-2. File Station: create the folder `docker/walkbox/data` (the database lives here), or extract the deploy zip that already contains it.
-3. Dockhand: create a stack named `walkbox`, paste in `docker-compose.yml` from this repo, and deploy.
-4. In Zoraxy, add a proxy rule for your hostname with target `walkbox:8080` (container name and internal port; TLS off).
+2. File Station: create the folders `docker/walkbox/data` (the database and the downloaded NZ file live here) and `docker/walkbox/valhalla`,
+   or extract the deploy zip that already contains them.
+3. Settings: every setting lives in a `.env` file next to the compose file. Copy `.env.example` to `.env` (the deploy zip already has it),
+   put your `CARTO_KEY` in it if you have one, and change anything else you like. `.env` is git-ignored, so keys never reach GitHub.
+   In Dockhand, paste the contents of `.env` into the stack's environment variables if it keeps them separately.
+   Delete a line and the built-in default applies.
+4. Dockhand: create a stack named `walkbox`, paste in `docker-compose.yml` from this repo, and deploy.
+5. In Zoraxy, add a proxy rule for your hostname with target `walkbox:8080` (container name and internal port; TLS off).
    Walkbox joins the existing `proxynet` Docker network and publishes no host port.
    There is no login, so enable authentication/access control on the proxy rule.
 
@@ -189,52 +194,66 @@ straight away; OpenStreetMap walks can be searched by name once their download o
 
 ## One-off NZ downloads (the Data tab)
 
-The **Data** tab downloads New Zealand data once, with a progress bar for each item. All six boxes start ticked.
+The **Data** tab downloads New Zealand data once, with a progress bar for each item. All boxes start ticked.
 
 | Item | Size (estimate) | Who does it |
 |---|---|---|
 | DOC walking experiences | ~5 MB | Walkbox, into its database |
 | National tracks (council and other) | ~60 MB | Walkbox, into its database |
-| Walkbox's own store: OpenStreetMap walks | ~20–60 MB | Walkbox, square by square from the Overpass servers (nearest Auckland first) |
-| Raw OSM extract | ~400 MB | Walkbox, saved as `data/osm/new-zealand-latest.osm.pbf`; a stopped download carries on from where it stopped |
+| Raw OSM extract | ~400 MB | Walkbox, saved as `data/osm/new-zealand-latest.osm.pbf`; a stopped download carries on from where it stopped (only if the server's file is still the same one) |
+| Walkbox's own store: OpenStreetMap walks | ~100–200 MB | Walkbox, built from the extract above in a few minutes; no map server is involved |
 | Valhalla routing tiles | ~1–2 GB | The `walkbox-valhalla` container builds them; Walkbox shows its progress |
-| Self-hosted Overpass database | ~3–6 GB | The `walkbox-overpass` container imports it; Walkbox shows its progress |
 
-Once the stored walks are in, **Find** answers from Walkbox's own database (no waiting on the public servers) and opening a DOC or
-council track needs no lookup. OpenStreetMap squares are used as soon as each one is done; areas not reached yet still use the live
-servers. When your own Overpass server is ready, Walkbox asks it first and falls back to the public ones. Downloads run in the
-background, survive a restart and can be cancelled. The public Overpass servers sometimes refuse big areas (HTTP 504): Walkbox then retries, cuts that square into smaller ones, and skips any square that stays refused instead of stopping; press Download again later to fetch only the missed squares. The first start queues everything for all of NZ (set `SEED_AUTOSTART` to `0` to
-start them yourself). Create the `/volume1/docker/walkbox/overpass` folder before deploying.
+Once the stored walks are in, **Find** answers from Walkbox's own database (no waiting on any server) and opening a walk needs no lookup at all:
+every route is stored with its line. Downloads run in the background, survive a restart and can be cancelled. The first start queues everything
+for all of NZ (set `SEED_AUTOSTART` to `0` to start them yourself).
 
-## Settings (environment variables)
+**How the OpenStreetMap store is built.** A separate process reads the extract in three light passes (route relations, then footpaths, then only
+the points those footpaths use) and Walkbox joins the pieces into walks: official routes, and named paths whose pieces touch each other. It
+needs roughly 1 GB of free memory for a few minutes, and it runs apart from the website so the site stays responsive and an out-of-memory stop
+cannot take it down. The new walks replace the old ones in one step, so searches keep working while it runs.
+
+**Monthly renewal.** Every `OSM_REFRESH_DAYS` (30) days Walkbox fetches a fresh extract and rebuilds the store from it by itself. The old file and
+walks stay in use until the new ones are complete. If the download fails, nothing is lost and it is tried again a day later. Set
+`OSM_REFRESH_DAYS` to `0` to renew only when you press Download. The Data tab shows when the next renewal is due.
+
+Walkbox no longer needs its own Overpass server. The live OpenStreetMap servers (`OVERPASS_URLS`) are still used for areas outside the store
+and until the store has been built; `OVERPASS_LOCAL_URL` is kept for anyone who runs their own.
+
+## Settings (the `.env` file)
+
+All settings are in `.env` (see `.env.example` for every one, with its default and a note). The compose file reads them from there.
 
 | Name | Default | Meaning |
 |---|---|---|
-| DB_PATH | /data/walkbox.db | Where the database is stored. |
-| MAX_SPAN_DEG | 0.5 | Largest map area searched (degrees, about 55 km). |
-| MAX_RESULTS | 150 | Most routes returned per search. |
-| PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |
-| VALHALLA_URL | (blank) | Address of the Valhalla routing engine; blank hides the turn-by-turn buttons. |
-| WEATHER_URL | Open-Meteo forecast API | Weather service used by the weather card. |
-| SEARCH_CACHE_SECONDS | 21600 | How long a finished search of the same area is remembered. |
-| OVERPASS_HEDGE_SECONDS | 6 | Ask the next OpenStreetMap server if the first has not answered in this time. |
-| OVERPASS_TIMEOUT | 30 | Give up on one OpenStreetMap request after this many seconds. |
-| MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
-| MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
-| MIN_PATH_KM | 0.8 | Shortest named path (grouped by name) listed as a walk. |
-| PATH_HIGHWAYS | footway\|path\|track\|pedestrian | OSM path types used for "Named paths". |
-| ROUTE_TYPES | hiking\|foot\|walking | OSM route types to include. |
-| OVERPASS_URLS | overpass-api.de, overpass.kumi.systems | Comma-separated Overpass servers, tried in order. |
-| OVERPASS_LOCAL_URL | (blank) | Your own Overpass server; asked first once it answers. |
+| WALKBOX_DIR | /volume1/docker/walkbox | Folder on the NAS holding `data/` and `valhalla/`. |
 | CARTO_KEY | (blank) | Optional free key from carto.com/basemaps/apikey. With it the street layer is the CARTO Voyager map; without it, OpenStreetMap tiles. The key is visible in the page, so restrict it to your Walkbox address on the CARTO dashboard. |
 | SEED_AUTOSTART | 1 | Queue the NZ downloads on the very first start. |
-| OSM_EXTRACT_URL | Geofabrik NZ .osm.pbf | File fetched by "Raw OSM extract". |
-| SEED_CELL_DEG | 0.5 | Size of each square when storing OpenStreetMap walks. |
-| SEED_TIMEOUT | 180 | Seconds one big download request may take. |
-| SEED_PAUSE_SECONDS | 1.5 | Pause between big requests to the public servers. |
-| SEED_ATTEMPTS | 2 | Tries for one square before it is cut into four smaller ones. |
-| SEED_MAX_SPLIT | 4 | How many times a refused square may be halved (0.5° down to about 3 km). |
-| SEED_GIVE_UP_AFTER | 12 | Refusals in a row before the OpenStreetMap download stops and reports the servers as not answering. |
+| OSM_EXTRACT_URL | Geofabrik NZ .osm.pbf | File fetched by "Raw OSM extract" (Valhalla uses it too). |
+| OSM_REFRESH_DAYS | 30 | Days between automatic renewals of the OSM file and store; 0 = never by itself. |
+| SEED_CELL_DEG | 0.5 | Size of the map squares used to record which areas the store covers. |
+| SEED_PAUSE_SECONDS | 0.3 | Pause between requests when downloading the DOC and council tracks. |
+| MIN_PATH_KM | 0.8 | Shortest named path (joined by name) listed as a walk. |
+| MIN_TRACK_KM | 0.3 | Shortest NZ council track (grouped by name) listed as a walk. |
+| ROUTE_TYPES | hiking\|foot\|walking | OSM route types to include. |
+| PATH_HIGHWAYS | footway\|path\|track\|pedestrian | OSM path types used for "Named paths". |
+| MAX_PATH_WAYS | 2500 | Most path pieces read per live search (before the store is built). |
+| MAX_SPAN_DEG | 0.5 | Largest map area searched (degrees, about 55 km). |
+| MAX_RESULTS | 150 | Most routes returned per search. |
+| SEARCH_CACHE_SECONDS | 21600 | How long a finished search of the same area is remembered. |
+| MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
+| PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |
+| OVERPASS_URLS | overpass-api.de, overpass.kumi.systems | Comma-separated live Overpass servers, tried in order. |
+| OVERPASS_HEDGE_SECONDS | 6 | Ask the next OpenStreetMap server if the first has not answered in this time. |
+| OVERPASS_TIMEOUT | 30 | Give up on one OpenStreetMap request after this many seconds. |
+| OVERPASS_LOCAL_URL | (blank) | Optional: your own Overpass server, asked first once it answers. |
+| VALHALLA_URL | http://walkbox-valhalla:8002 | Address of the Valhalla routing engine; blank hides the turn-by-turn buttons. |
+| VALHALLA_THREADS | 2 | Threads for the Valhalla container. |
+| WEATHER_URL, ELEVATION_URL, COMMONS_URL | Open-Meteo, Open-Meteo, Wikimedia | The weather, elevation and photo services. |
+| DOC_URL, NZT_URL | the ArcGIS services | DOC walks and national tracks; change only if the source moves. |
+| USER_AGENT | walkbox/1.1 (self-hosted walk library) | How Walkbox introduces itself to those services. |
+
+`DB_PATH` (`/data/walkbox.db`) is fixed by the compose volume and is not in `.env`.
 
 ## Backup
 
