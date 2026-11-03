@@ -700,8 +700,8 @@ def list_doc(s, w, n, e):
     params = {
         "where": "1=1", "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
         "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "false",
-        "outFields": "OBJECTID,name,introduction,difficulty,completionTime,region,"
-                     "walkingAndTrampingWebPage,staticLink,Shape__Length",
+        "outFields": "OBJECTID,name,introduction,difficulty,completionTime,"
+                     "walkingAndTrampingWebPage,Shape__Length",
         "resultRecordCount": MAX_RESULTS, "f": "json",
     }
     walks = []
