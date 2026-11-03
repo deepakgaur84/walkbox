@@ -194,7 +194,7 @@ The **Data** tab downloads New Zealand data once, with a progress bar for each i
 Once the stored walks are in, **Find** answers from Walkbox's own database (no waiting on the public servers) and opening a DOC or
 council track needs no lookup. OpenStreetMap squares are used as soon as each one is done; areas not reached yet still use the live
 servers. When your own Overpass server is ready, Walkbox asks it first and falls back to the public ones. Downloads run in the
-background, survive a restart and can be cancelled. The first start queues everything for all of NZ (set `SEED_AUTOSTART` to `0` to
+background, survive a restart and can be cancelled. The public Overpass servers sometimes refuse big areas (HTTP 504): Walkbox then retries, cuts that square into smaller ones, and skips any square that stays refused instead of stopping; press Download again later to fetch only the missed squares. The first start queues everything for all of NZ (set `SEED_AUTOSTART` to `0` to
 start them yourself). Create the `/volume1/docker/walkbox/overpass` folder before deploying.
 
 ## Settings (environment variables)
@@ -222,6 +222,9 @@ start them yourself). Create the `/volume1/docker/walkbox/overpass` folder befor
 | SEED_CELL_DEG | 0.5 | Size of each square when storing OpenStreetMap walks. |
 | SEED_TIMEOUT | 180 | Seconds one big download request may take. |
 | SEED_PAUSE_SECONDS | 1.5 | Pause between big requests to the public servers. |
+| SEED_ATTEMPTS | 2 | Tries for one square before it is cut into four smaller ones. |
+| SEED_MAX_SPLIT | 4 | How many times a refused square may be halved (0.5° down to about 3 km). |
+| SEED_GIVE_UP_AFTER | 12 | Refusals in a row before the OpenStreetMap download stops and reports the servers as not answering. |
 
 ## Backup
 

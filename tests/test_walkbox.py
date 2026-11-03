@@ -995,19 +995,34 @@ edge = [json.loads(r["light"]) for r in conn.execute("SELECT light FROM store WH
 assert len(edge) == 1 and abs(edge[0]["distance_km"] - 1.4) < 0.01 and edge[0]["recipe"]["bbox"][0] == -36.51 and edge[0]["recipe"]["bbox"][2] == -36.49, edge
 assert conn.execute("SELECT COUNT(*) FROM store WHERE name='Far Walk'").fetchone()[0] == 1
 
-# A square the server cannot answer is split in four and tried again; a hopeless one is reported, not hidden
+# A square the server refuses is tried twice, then cut in four; a square that stays refused is skipped, not fatal
 tries = []
 def pickyop(q, lane=None):
     m = _re.search(r"bbox:([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)", q); tries.append(float(m.group(3)) - float(m.group(1)))
     if float(m.group(3)) - float(m.group(1)) > 0.3: raise RuntimeError("server too busy")
     return {"elements": []}
 wb.overpass = pickyop
-assert wb._osm_cell(conn, -37.0, 174.5, -36.5, 175.0) == 0 and tries == [0.5, 0.25, 0.25, 0.25, 0.25], tries
-wb.overpass = lambda q, lane=None: (_ for _ in ()).throw(RuntimeError("down"))
-wb.seed_cells = lambda: [(-37.0, 174.5)]; conn.execute("DELETE FROM seed_cells"); conn.commit()
+assert wb._osm_cell(conn, -37.0, 174.5, -36.5, 175.0, wb.Refusals()) == (0, []) and tries == [0.5, 0.5, 0.25, 0.25, 0.25, 0.25], tries
+def stubborn(q, lane=None):                                      # the first square is always refused, the second is fine
+    m = _re.search(r"bbox:([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)", q)
+    if float(m.group(1)) < -36.4 and float(m.group(1)) >= -37.0 and float(m.group(2)) < 175.0: raise RuntimeError("HTTP 504")
+    return fake_overpass(q, lane)
+wb.overpass = stubborn
+wb.seed_cells = lambda: [(-37.0, 174.5), (-38.0, 175.0)]; conn.execute("DELETE FROM seed_cells"); conn.commit()
+saved_cfg = (wb.SEED_MAX_SPLIT, wb.SEED_GIVE_UP_AFTER); wb.SEED_MAX_SPLIT, wb.SEED_GIVE_UP_AFTER = 1, 1000
 wb.seed_run_one(conn, "store_osm")
 ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
-assert ov["store_osm"]["status"] == "error" and "down" in ov["store_osm"]["msg"], ov["store_osm"]
+assert ov["store_osm"]["status"] == "error" and "1 squares were refused" in ov["store_osm"]["msg"] and "try them again" in ov["store_osm"]["msg"], ov["store_osm"]
+assert [r["cell"] for r in conn.execute("SELECT cell FROM seed_cells")] == ["-38.000,175.000"]                    # the good square was kept
+wb.overpass = fake_overpass; wb.seed_run_one(conn, "store_osm")                                                  # pressing Download again fetches only what is missing
+assert c.get("/api/seed").get_json()["items"][3]["status"] == "done" and conn.execute("SELECT COUNT(*) FROM seed_cells").fetchone()[0] == 2
+wb.SEED_MAX_SPLIT, wb.SEED_GIVE_UP_AFTER = saved_cfg
+# servers that answer nothing at all stop the job quickly with a clear message
+wb.overpass = lambda q, lane=None: (_ for _ in ()).throw(RuntimeError("overpass-api.de: HTTP 504"))
+conn.execute("DELETE FROM seed_cells"); conn.commit()
+wb.seed_run_one(conn, "store_osm")
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["store_osm"]["status"] == "error" and "keep refusing" in ov["store_osm"]["msg"] and "HTTP 504" in ov["store_osm"]["msg"], ov["store_osm"]
 wb.overpass = fake_overpass
 
 # Raw OSM extract: streamed to the data folder, and a stopped download carries on instead of starting again
@@ -1091,7 +1106,7 @@ assert c.post("/api/find", json={"q": "zzzz", "sources": ["doc", "nz", "paths"]}
 assert c.post("/api/find", json={"q": "a"}).status_code == 400 and c.post("/api/find", json={"q": "!!"}).status_code == 400
 assert c.post("/api/find", json={"q": "kauri", "sources": ["bogus"]}).status_code == 400
 assert c.post("/api/find", json={"q": "x'; DROP TABLE store; --"}).status_code == 200                           # words only: quotes never reach a query
-assert conn.execute("SELECT COUNT(*) FROM store").fetchone()[0] == 2
+assert conn.execute("SELECT COUNT(*) FROM store").fetchone()[0] >= 2
 # a stored download answers by name with no live call
 wb.seed_set(conn, "store_doc", "done"); wb.seed_set(conn, "store_nz", "done")
 wb.store_put(conn, wb.make_light(wb.DOC_BASE + 9, "doc", "Maungauika North Head Historic Walk", {"kind": "doc", "oid": 9}, {}, 2.4, False, None), (-36.83, 174.8, -36.82, 174.82)); conn.commit()

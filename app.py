@@ -59,6 +59,10 @@ VALHALLA_DIR = os.environ.get("VALHALLA_DIR", "/valhalla")               # optio
 OVERPASS_DIR = os.environ.get("OVERPASS_DIR", "/overpass")
 SEED_CELL_DEG = float(os.environ.get("SEED_CELL_DEG", "0.5"))
 SEED_TIMEOUT = int(os.environ.get("SEED_TIMEOUT", "180"))
+SEED_ATTEMPTS = int(os.environ.get("SEED_ATTEMPTS", "2"))               # tries for one square before it is cut into four
+SEED_MAX_SPLIT = int(os.environ.get("SEED_MAX_SPLIT", "4"))             # 0.5° squares can be halved this many times (down to about 3 km)
+SEED_RETRY_PAUSE = float(os.environ.get("SEED_RETRY_PAUSE_SECONDS", "8"))
+SEED_GIVE_UP_AFTER = int(os.environ.get("SEED_GIVE_UP_AFTER", "12"))    # this many refusals in a row: the servers are not answering
 SEED_PAUSE = float(os.environ.get("SEED_PAUSE_SECONDS", "1.5"))          # a polite gap between big requests to the public servers
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "150"))
@@ -2403,26 +2407,48 @@ def cell_id(s, w):
     return "%.3f,%.3f" % (s, w)
 
 
-def _osm_cell(conn, s, w, n, e, depth=0):
-    """Store the walks of one square. A square the server cannot answer is split in four and tried again."""
-    try:
-        walks = list_osm(s, w, n, e, True, True, max_rel=3000, max_ways=40000, lane="seed", qtimeout=SEED_TIMEOUT)
-    except RuntimeError:
-        if depth >= 2:
-            raise
+class Refusals:
+    """Counts how many requests in a row the servers refused, so a dead server stops the job instead of grinding for hours."""
+    def __init__(self):
+        self.row, self.last = 0, ""
+
+
+def _osm_cell(conn, s, w, n, e, refusals, depth=0):
+    """Store the walks of one square. If the servers refuse it, try once more, then cut it in four and try each part.
+
+    Returns (walks stored, [parts that could not be fetched])."""
+    err = None
+    for attempt in range(max(1, SEED_ATTEMPTS)):
+        try:
+            walks = list_osm(s, w, n, e, True, True, max_rel=3000, max_ways=40000, lane="seed", qtimeout=SEED_TIMEOUT)
+            break
+        except RuntimeError as ex:
+            err = ex
+            refusals.row += 1
+            refusals.last = str(ex)
+            if refusals.row >= SEED_GIVE_UP_AFTER:
+                raise RuntimeError("The OpenStreetMap servers keep refusing big requests (%s)." % str(ex)[:160])
+            if attempt + 1 < SEED_ATTEMPTS and SEED_RETRY_PAUSE:
+                time.sleep(SEED_RETRY_PAUSE)
+    else:
+        if depth >= SEED_MAX_SPLIT:
+            return 0, [(s, w, n, e)]
         ms, mw = (s + n) / 2, (w + e) / 2
+        total, failed = 0, []
         for a, b, c2, d in ((s, w, ms, mw), (s, mw, ms, e), (ms, w, n, mw), (ms, mw, n, e)):
-            _osm_cell(conn, a, b, c2, d, depth + 1)
-        return 0
+            got, bad = _osm_cell(conn, a, b, c2, d, refusals, depth + 1)
+            total += got
+            failed += bad
+        return total, failed
+    refusals.row = 0
     for wk in walks:
         if wk["source"] == "osm-route":
             bb = wk.get("bb") or [wk["lat"], wk["lon"], wk["lat"], wk["lon"]]
         else:
-            b = wk["recipe"]["bbox"]
-            bb = b
+            bb = wk["recipe"]["bbox"]
         store_put(conn, wk, bb)
     conn.commit()
-    return len(walks)
+    return len(walks), []
 
 
 def merge_osm_paths(conn):
@@ -2467,20 +2493,30 @@ def seed_osm(conn):
     cells = seed_cells()
     done_cells = {r["cell"] for r in conn.execute("SELECT cell FROM seed_cells WHERE item='store_osm'")}
     seed_check(conn, "store_osm", len(done_cells), len(cells), "Starting near Auckland…")
+    refusals, skipped = Refusals(), []
     for s, w in cells:
         cid = cell_id(s, w)
         if cid in done_cells:
             continue
-        count = _osm_cell(conn, s, w, s + SEED_CELL_DEG, w + SEED_CELL_DEG)
-        conn.execute("INSERT OR IGNORE INTO seed_cells (item, cell) VALUES ('store_osm', ?)", (cid,))
-        conn.commit()
-        done_cells.add(cid)
+        count, failed = _osm_cell(conn, s, w, s + SEED_CELL_DEG, w + SEED_CELL_DEG, refusals)
+        if failed:
+            skipped.append(cid)
+        else:
+            conn.execute("INSERT OR IGNORE INTO seed_cells (item, cell) VALUES ('store_osm', ?)", (cid,))
+            conn.commit()
+            done_cells.add(cid)
         seed_check(conn, "store_osm", len(done_cells), len(cells),
-                   "%d of %d squares done (last square: %d walks)" % (len(done_cells), len(cells), count))
+                   "%d of %d squares done%s (last square: %d walks)" % (len(done_cells), len(cells),
+                                                                        ", %d skipped (servers busy)" % len(skipped) if skipped else "", count))
         if SEED_PAUSE:
             time.sleep(SEED_PAUSE)
     merged = merge_osm_paths(conn)
     total = conn.execute("SELECT COUNT(*) FROM store WHERE source IN ('osm-route','osm-path')").fetchone()[0]
+    if skipped:
+        seed_set(conn, "store_osm", "error", len(done_cells), len(cells),
+                 "Stored %d walks. %d squares were refused by the busy servers; press Download to try them again (areas not stored still search live)."
+                 % (total, len(skipped)))
+        return
     seed_set(conn, "store_osm", "done", len(cells), len(cells), "%d OpenStreetMap walks stored (%d joined across square edges)" % (total, merged))
 
 
