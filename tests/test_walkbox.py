@@ -108,7 +108,7 @@ DOC_DETAIL = {"features": [{
                    "difficulty": "Easy", "completionTime": "1 hr 30 min one way", "region": "Northland",
                    "walkingAndTrampingWebPage": "https://www.doc.govt.nz/x"},
 }]}
-DOC_LIST = {"features": [{"attributes": {
+DOC_LIST = {"features": [{"geometry": {"paths": [[[174.0, -36.0], [174.0, -36.02]]]}, "attributes": {
     "OBJECTID": 7, "name": "Test Kauri Track", "introduction": "Big trees.", "difficulty": "Easy",
     "completionTime": "1 hr 30 min one way", "region": "Northland",
     "walkingAndTrampingWebPage": "https://www.doc.govt.nz/x", "Shape__Length": 3200.0}}]}
@@ -130,7 +130,7 @@ NZ_ROWS = [
     (5, "Test Kauri Track", 3, way_geom((-36.0, 174.0), (-36.05, 174.0)), 5500.0),   # duplicate of the DOC name
 ]
 NZT_DETAIL = {"features": [feat(i, n, w, g) for i, n, w, g, _ in NZ_ROWS]}
-NZT_LIST = {"features": [{"attributes": dict(feat(i, n, w, g)["properties"], Shape__Length=L)} for i, n, w, g, L in NZ_ROWS]}
+NZT_LIST = {"features": [{"geometry": {"paths": [[[p["lon"], p["lat"]] for p in g]]}, "attributes": dict(feat(i, n, w, g)["properties"], Shape__Length=L)} for i, n, w, g, L in NZ_ROWS]}
 
 PLACES_OVERPASS = {"elements": [
     {"type": "node", "id": 1, "lat": -36.7955, "lon": 174.7712, "tags": {"amenity": "cafe", "name": "Beach Café", "opening_hours": "Mo-Su 07:00-16:00"}},
@@ -192,7 +192,7 @@ def fake_get(url, **kw):
         return Resp({"elevation": [100 + (i % 10) * 3 for i in range(n)]})
     if "commons.wikimedia.org" in url:
         return Resp(COMMONS)
-    light = params.get("returnGeometry") == "false"
+    light = params.get("returnGeometry") == "false" or "maxAllowableOffset" in params     # lists ask for a coarse line, details for the full route
     if "b5ADKIcWivL5vNaV" in url:
         return Resp(NZT_LIST if light else NZT_DETAIL)
     return Resp(DOC_LIST if light else DOC_DETAIL)
@@ -229,7 +229,8 @@ assert "[bbox:-36.900000,174.700000,-36.700000,174.900000]" in oq               
 assert '["route"="hiking"]' in oq and '["highway"="footway"]' in oq                      # exact matches, not regular expressions
 assert '"highway"~' not in oq and '["route"~' not in oq
 assert isinstance(r.get_json()["ms"], int)
-assert all(p.get("returnGeometry") == "false" for u, p in get_log if "arcgis" in u or "b5ADKIcWivL5vNaV" in u)
+lists = [p for u, p in get_log if ("arcgis" in u or "b5ADKIcWivL5vNaV" in u) and "maxAllowableOffset" in p]
+assert lists and all(p.get("returnGeometry") == "true" and p["maxAllowableOffset"] < 0.01 for p in lists)      # lists fetch only a coarse line, never the full route
 
 assert "Test Loop & Ridge" in by_name and "Test Kauri Track" in by_name and "Takapuna Beach Walkway" in by_name, list(by_name)
 assert "Tiny Alley" not in by_name and "Footpath" not in by_name and "Bit of Path" not in by_name
@@ -238,6 +239,7 @@ assert walkway["source"] == "nz-track" and not walkway["approx"] and 1.3 < walkw
 assert walkway["difficulty"] == "Walking track" and walkway["region"] == "Takapuna"
 assert walkway["description"] == "Coastal boardwalk and sand." and walkway["link"] == "https://example.org/walkway"
 assert walkway["dogs"] == "on lead only" and walkway["wheelchair"] == "yes" and walkway["status"] is None     # structured facts, not glued onto the text
+assert abs(walkway["lat"] - (-36.79)) < 1e-6 and abs(walkway["lon"] - 174.77) < 1e-6, walkway           # a start point for the map dot
 assert walkway["time_range"].endswith("(est.)") and " – " in walkway["time_range"], walkway["time_range"]       # a range, like a planning app
 assert sum(1 for x in res if x["name"] == "Takapuna Beach Walkway") == 1       # OSM duplicate dropped
 kauri = by_name["Test Kauri Track"]
@@ -415,7 +417,12 @@ assert first["thumb"].startswith("https://upload.wikimedia.org/") and first["pag
 assert pj["photos"][1]["by"] == "Unknown author"
 assert c.get("/api/walks/999999/photos").status_code == 404
 wb._rate_calls.clear(); wb.PHOTOS_PER_MIN = 2
-assert [c.get("/api/walks/%d/photos" % nz_id).status_code for _ in range(3)] == [200, 200, 429]
+assert [c.get("/api/walks/%d/photos" % nz_id).status_code for _ in range(3)] == [200, 200, 200]          # a repeat is answered from the saved copy: no new lookup
+kvclear()
+wb._rate_calls.clear(); kvclear(); wb.PHOTOS_PER_MIN = 2
+r1 = []
+for _ in range(3): r1.append(c.get("/api/walks/%d/photos" % nz_id).status_code); kvclear()
+assert r1 == [200, 200, 429], r1                                                                          # fresh lookups are still rate limited
 wb.PHOTOS_PER_MIN = 30; wb._rate_calls.clear()
 real_get = wb.requests.get
 def down(url, **kw):
@@ -1150,4 +1157,16 @@ assert row["done"] is True and row["done_at"] and row["alerts_url"] == "https://
 assert c.put("/api/walks/%d/done" % (wb.DOC_BASE + 7), json={"done": False}).get_json()["done_at"] is None
 assert c.put("/api/walks/987654/done", json={"done": True}).status_code == 404                                   # only walks in the box
 assert b"At a glance" in c.get("/").data and b"View current alerts" in c.get("/").data
+
+# one photo for a card, and photos for a walk that is only open on screen
+wb._rate_calls.clear(); kvclear()
+pn = c.get("/api/photo_near?lat=-36.79&lon=174.77").get_json()
+assert pn["photo"] and pn["photo"]["thumb"].startswith("https://upload.wikimedia.org/") and pn["photo"]["by"], pn
+assert c.get("/api/photo_near?lat=x&lon=1").status_code == 400
+n_before = len([1 for u, p in get_log if "commons.wikimedia.org" in u])
+assert c.get("/api/photo_near?lat=-36.79&lon=174.77").get_json() == pn                                         # the second time: from the saved copy
+assert len([1 for u, p in get_log if "commons.wikimedia.org" in u]) == n_before
+wb._cache[777777] = {"osm_id": 777777, "name": "Open only", "chains": [[(-36.79, 174.77), (-36.8, 174.77)]]}
+assert c.get("/api/walks/777777/photos").get_json()["photos"], "photos for a walk that is not in the box"
+assert c.get("/api/walks/888888/photos").status_code == 404
 print("SEED TESTS PASSED")

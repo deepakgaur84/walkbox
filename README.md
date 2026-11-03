@@ -161,6 +161,15 @@ The NAS only pulls that image, so no code folder and no `git` on the NAS are nee
 
 To update after code changes: push to `main`, wait for the green tick on the Actions tab, then redeploy the stack in Dockhand with "pull latest image".
 
+## Look and feel
+
+Walkbox opens as a floating panel over a full-screen map. **Explore** lists walks as cards (a nearby open-licence photo from Wikimedia
+Commons when there is one, otherwise a coloured tile) with a ♡ to save to your box. Every result has a dot on the map; at lower zoom
+nearby dots merge into "N trails" and tapping one zooms in. The chips above the map (Difficulty, Length, Elevation, Features, Sources)
+narrow the list already on screen; **Sources** picks what the next search fetches. Tapping a walk opens its page in the panel: photos,
+length, climb, estimated time, facts, description, elevation, weather and nearby places, with **Download GPX** pinned at the bottom.
+The **Map layers** box switches between streets (CARTO), satellite (Esri) and topographic (OpenTopoMap).
+
 ## At a glance
 
 Opening a walk shows a panel of the facts you check before leaving: distance, time (DOC's own time, or a range estimated from distance and

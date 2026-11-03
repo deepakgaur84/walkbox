@@ -128,7 +128,7 @@ SEARCH_TTL = int(os.environ.get("SEARCH_CACHE_SECONDS", "21600"))
 GRID_DEG = 0.05                    # searches are aligned to this grid (about 5 km), so nearby views share one cached search
 HEDGE_SECONDS = float(os.environ.get("OVERPASS_HEDGE_SECONDS", "6"))
 OVERPASS_TIMEOUT = int(os.environ.get("OVERPASS_TIMEOUT", "30"))
-KV_TTL = {"light": 7 * 86400, "detail": 7 * 86400, "places": 86400, "terrain": 7 * 86400, "profile": 30 * 86400}
+KV_TTL = {"photos": 30 * 86400, "light": 7 * 86400, "detail": 7 * 86400, "places": 86400, "terrain": 7 * 86400, "profile": 30 * 86400}
 _rate_calls = {}
 
 
@@ -701,10 +701,21 @@ def _arcgis_get(url, params, label):
     return data
 
 
+COARSE = {"outSR": 4326, "maxAllowableOffset": 0.003, "geometryPrecision": 4}   # a rough line is enough to put a dot on the map
+
+
+def start_of(f):
+    """(lat, lon) of the first point of an ArcGIS line feature, or None."""
+    for path in ((f.get("geometry") or {}).get("paths") or []):
+        if path:
+            return (path[0][1], path[0][0])
+    return None
+
+
 def list_doc(s, w, n, e):
     params = {
         "where": "1=1", "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
-        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "false",
+        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "true", **COARSE,
         "outFields": "OBJECTID,name,introduction,difficulty,completionTime,"
                      "walkingAndTrampingWebPage,Shape__Length",
         "resultRecordCount": MAX_RESULTS, "f": "json",
@@ -721,7 +732,7 @@ def doc_lights(features):
         oid = int(p["objectid"])
         walks.append(make_light(
             DOC_BASE + oid, "doc", p.get("name") or "DOC track", {"kind": "doc", "oid": oid},
-            {"operator": "Department of Conservation"}, _km(p), False, None,
+            {"operator": "Department of Conservation"}, _km(p), False, start_of(f),
             description=p.get("introduction"), difficulty=p.get("difficulty"), time_text=p.get("completiontime"),
             region=p.get("region"), link=p.get("walkingandtrampingwebpage") or p.get("staticlink"),
             alerts_url=p.get("walkingandtrampingwebpage") or p.get("staticlink")))
@@ -757,7 +768,7 @@ def nz_light_id(name, authority):
 def list_nz(s, w, n, e):
     params = {
         "where": NZ_WHERE, "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
-        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "false",
+        "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "true", **COARSE,
         "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,"
                      "DogAccess,MobilityAccess,ManagedBy,Status,ConditionsOfUse,Shape__Length",
         "resultRecordCount": 2000, "f": "json",
@@ -773,8 +784,9 @@ def nz_lights(features, bbox):
         if not name or name.lower() in GENERIC_NAMES:
             continue
         key = (name.lower(), str(p.get("localauthority") or "").lower())
-        g = groups.setdefault(key, {"name": name, "props": [], "km": 0.0, "known": False})
+        g = groups.setdefault(key, {"name": name, "props": [], "km": 0.0, "known": False, "start": None})
         g["props"].append(p)
+        g["start"] = g["start"] or start_of(f)
         km = _km(p)
         if km:
             g["km"] += km
@@ -788,7 +800,7 @@ def nz_lights(features, bbox):
         walks.append(make_light(
             nz_light_id(g["name"], sm["authority"]), "nz-track", g["name"],
             {"kind": "nz", "name": g["name"], "bbox": bbox, "authority": sm["authority"]}, {"operator": sm["operator"]},
-            dist, False, None, description=sm["description"], difficulty=sm["difficulty"],
+            dist, False, g["start"], description=sm["description"], difficulty=sm["difficulty"],
             link=sm["link"], region=sm["region"], dogs=sm["dogs"], wheelchair=sm["wheelchair"],
             status=sm["status"], conditions=sm["conditions"]))
     return walks
@@ -1574,7 +1586,7 @@ def _plain(text):
 
 def commons_photos(chain, limit=12):
     """Openly licensed, geotagged photos near the start, middle and end of a walk."""
-    pts = [chain[0], chain[len(chain) // 2], chain[-1]]
+    pts = list(dict.fromkeys(tuple(x) for x in (chain[0], chain[len(chain) // 2], chain[-1])))     # one request per distinct place
     seen, found = set(), []
     for order, (lat, lon) in enumerate(pts):
         params = {
@@ -1614,15 +1626,45 @@ def commons_photos(chain, limit=12):
 @app.get("/api/walks/<int:osm_id>/photos")
 def api_photos(osm_id):
     row = db().execute("SELECT geom FROM walks WHERE osm_id=?", (osm_id,)).fetchone()
-    if not row:
-        abort(404)
+    if row:
+        chain = json.loads(row["geom"])[0]
+    else:                                                    # a walk that is only open on screen: its route is in the cache
+        wk = cached_walk(osm_id)
+        if not wk or not wk.get("chains"):
+            abort(404)
+        chain = wk["chains"][0]
+    hit = kv_get("photos", osm_id)
+    if hit is not None:
+        return jsonify(photos=hit)
     if not rate_ok("photos", PHOTOS_PER_MIN):
         return jsonify(error="Too many photo lookups just now. Try again in a minute."), 429
     try:
-        chain = json.loads(row["geom"])[0]
-        return jsonify(photos=commons_photos(chain))
+        found = commons_photos(chain)
     except RuntimeError as ex:
         return jsonify(error="Photo service problem: %s" % ex), 502
+    kv_put("photos", osm_id, found)
+    return jsonify(photos=found)
+
+
+@app.get("/api/photo_near")
+def api_photo_near():
+    """One picture for a result card: the best openly licensed photo near the walk's start."""
+    try:
+        lat, lon = float(request.args["lat"]), float(request.args["lon"])
+    except (KeyError, ValueError):
+        return jsonify(error="lat and lon are required"), 400
+    key = "%.3f,%.3f" % (lat, lon)
+    hit = kv_get("photos", "near:" + key)
+    if hit is None:
+        if not rate_ok("cardphoto", 90):
+            return jsonify(photo=None)
+        try:
+            found = commons_photos([(lat, lon)] * 3, limit=1)
+        except RuntimeError:
+            return jsonify(photo=None)
+        hit = found[:1]
+        kv_put("photos", "near:" + key, hit)
+    return jsonify(photo=hit[0] if hit else None)
 
 
 def sample_profile(chain, n=160):
@@ -2822,7 +2864,7 @@ def find_by_name(tokens, sources):
     if "doc" in sources and not store_done("store_doc"):
         try:
             data = _arcgis_get(DOC_URL, {
-                "where": _like_where(tokens, ["name"]), "returnGeometry": "false", "f": "json", "resultRecordCount": FIND_LIMIT,
+                "where": _like_where(tokens, ["name"]), "returnGeometry": "true", **COARSE, "f": "json", "resultRecordCount": FIND_LIMIT,
                 "outFields": "OBJECTID,name,introduction,difficulty,completionTime,walkingAndTrampingWebPage,Shape__Length"}, "DOC")
             walks += doc_lights(data.get("features", []))
         except RuntimeError as ex:
@@ -2830,7 +2872,7 @@ def find_by_name(tokens, sources):
     if "nz" in sources and not store_done("store_nz"):
         try:
             data = _arcgis_get(NZT_URL, {
-                "where": "%s AND (%s)" % (NZ_WHERE, _like_where(tokens, ["Name", "MainTrail"])), "returnGeometry": "false", "f": "json",
+                "where": "%s AND (%s)" % (NZ_WHERE, _like_where(tokens, ["Name", "MainTrail"])), "returnGeometry": "true", **COARSE, "f": "json",
                 "resultRecordCount": 2000,
                 "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,DogAccess,MobilityAccess,ManagedBy,Status,ConditionsOfUse,Shape__Length"}, "NZ tracks")
             nz_s, nz_n, nz_w, nz_e = NZ_BOX

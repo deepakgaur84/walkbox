@@ -143,70 +143,269 @@
   .dp .st.err { color:var(--warn); } .dp .st.ok { color:#2e7d32; }
   .foot { padding:6px 10px; font-size:11px; color:var(--mute); border-top:1px solid var(--line); }
   @media (max-width:800px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:55vh; } #mapwrap { height:45vh; flex:none; } }
+
+  /* ===== v2 look: floating panel over a full-bleed map, like a modern trail app ===== */
+  :root { --brand:#3b6b2a; --brand2:#eef4e9; --ink:#1d241c; --mute:#6b7468; --line:#e4e8e1; --dark:#1b2619; --olive:#4a6b2a; }
+  body { display:block; background:#e9ede6; overflow:hidden; font:14px/1.4 -apple-system,"Segoe UI",Roboto,Inter,system-ui,sans-serif; }
+  main { position:absolute; inset:0; display:block; }
+  #mapwrap { position:absolute; inset:0; }
+  #side { position:absolute; left:12px; top:12px; bottom:12px; width:min(404px, calc(100vw - 24px)); max-width:none; z-index:1000; background:#fff; border:0; border-radius:18px; box-shadow:0 4px 24px rgba(0,0,0,.22); overflow:hidden; transition:transform .25s; }
+  #side.collapsed { transform:translateX(-120%); }
+  #openSide { position:absolute; left:12px; top:12px; z-index:1001; display:none; }
+  #side.collapsed ~ #openSide, body.sidehidden #openSide { display:flex; }
+  .rbtn { width:46px; height:46px; border-radius:50%; background:#fff; border:0; box-shadow:0 2px 8px rgba(0,0,0,.28); font-size:22px; line-height:1; cursor:pointer; color:#1d241c; display:flex; align-items:center; justify-content:center; padding:0; }
+  .rbtn:hover { background:#f3f6f1; } .rbtn.sm { width:36px; height:36px; font-size:16px; box-shadow:none; background:#eef1ec; }
+  .sh { display:flex; align-items:center; justify-content:space-between; padding:16px 18px 6px; }
+  .sh h2 { margin:0; font-size:21px; font-weight:600; letter-spacing:-.2px; }
+  .seg { display:flex; gap:6px; padding:4px 18px 10px; }
+  .seg button { border:1px solid var(--line); background:#fff; border-radius:20px; padding:5px 13px; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer; }
+  .seg button.active { background:var(--dark); border-color:var(--dark); color:#fff; }
+  #lv { display:flex; flex-direction:column; min-height:0; flex:1; }
+  body.detail #lv, body.detail .sh, body.detail .seg { display:none; }
+  #side { display:flex; flex-direction:column; }
+  .tools { padding:4px 18px 10px; border-bottom:0; gap:8px; }
+  .sbox { display:flex; align-items:center; gap:6px; flex:1 1 100%; background:#f1f3ef; border-radius:24px; padding:3px 4px 3px 14px; }
+  .sbox .mag { font-size:20px; color:var(--mute); }
+  .sbox input { flex:1; min-width:0; border:0 !important; background:transparent; padding:8px 4px !important; font-size:14px; outline:none; }
+  .sbox button { border:0; background:#fff; border-radius:18px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; color:var(--ink); box-shadow:0 1px 3px rgba(0,0,0,.15); white-space:nowrap; }
+  button.b { background:var(--dark); border-radius:24px; padding:10px 14px; font-weight:600; }
+  button.b.alt { background:#eef1ec; color:var(--ink); }
+  #findTools .b { width:100%; }
+  #countRow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 18px 6px; font-size:13px; color:var(--ink); }
+  #countRow .cr { display:flex; align-items:center; gap:10px; }
+  #countRow select { border:0; background:transparent; font:inherit; font-weight:600; color:var(--ink); cursor:pointer; padding:2px; }
+  .lnk { background:none; border:0; color:var(--brand); font-weight:600; cursor:pointer; padding:0; font-size:13px; }
+  #status { padding:0 18px 8px; font-size:12px; color:var(--mute); border:0; min-height:0; }
+  #list { padding:0 14px 14px; }
+  .foot { border-top:1px solid var(--line); padding:7px 16px; }
+  /* result cards */
+  .item { display:block; padding:0 0 14px; margin:0 0 12px; border:0; cursor:pointer; border-radius:14px; position:relative; }
+  .item:hover .ct { text-decoration:underline; }
+  .item.sel { background:var(--brand2); box-shadow:0 0 0 6px var(--brand2); }
+  .item.hot { box-shadow:0 0 0 4px #cfe3c4; }
+  .item .ph { position:relative; height:176px; border-radius:14px; overflow:hidden; background:#cfd8c9; }
+  .item .ph img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .3s; }
+  .item .ph img.in { opacity:1; }
+  .item .ph .art { position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:flex-start; padding:10px 12px; color:rgba(255,255,255,.9); font-size:12px; font-weight:600; }
+  .item .ph .art svg { position:absolute; right:-6px; bottom:-8px; width:150px; opacity:.22; }
+  .heart { position:absolute; right:10px; top:10px; width:38px; height:38px; border-radius:50%; background:#fff; border:0; font-size:19px; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.25); display:flex; align-items:center; justify-content:center; padding:0; color:#1d241c; }
+  .heart.on { color:#c62828; }
+  .item .ct { font-size:16px; font-weight:700; margin:9px 2px 0; line-height:1.25; }
+  .item .cs { font-size:13px; color:var(--mute); margin:1px 2px 0; }
+  .item .cm { font-size:13px; margin:3px 2px 0; display:flex; flex-wrap:wrap; gap:0 6px; align-items:center; color:var(--ink); }
+  .tri { display:inline-block; width:10px; height:9px; background:currentColor; clip-path:polygon(50% 0, 100% 100%, 0 100%); margin-right:1px; } .tri.d-easy { color:#2e7d32; } .tri.d-moderate { color:#e8a317; } .tri.d-hard { color:#e0561d; } .tri.d-none { color:#9aa597; }
+  .item .acts2 { display:flex; flex-wrap:wrap; gap:6px; margin:8px 2px 0; align-items:center; }
+  .item .acts2 .b, .item .acts2 a.dl { font-size:12px; padding:5px 11px; border-radius:16px; text-decoration:none; }
+  .badge { background:#e3efd9; color:#2f5a1f; }
+  /* filter chips and controls on the map */
+  #chipbar { position:absolute; left:440px; top:12px; right:84px; z-index:900; display:flex; flex-wrap:wrap; gap:8px; pointer-events:none; }
+  #chipbar > * { pointer-events:auto; }
+  .cw { position:relative; }
+  .cb { background:#fff; border:1px solid #d8ddd5; border-radius:22px; padding:9px 15px; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.18); display:flex; align-items:center; gap:6px; }
+  .cb:hover { background:#f6f8f4; } .cb.on { background:var(--dark); color:#fff; border-color:var(--dark); }
+  .cb .ico { font-size:15px; } .cb .car { font-size:10px; }
+  .pop { position:absolute; top:44px; left:0; min-width:210px; background:#fff; border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.28); padding:8px 6px; display:none; z-index:950; }
+  .pop.open { display:block; }
+  .pop label { display:flex; align-items:center; gap:9px; padding:8px 10px; font-size:14px; cursor:pointer; border-radius:8px; }
+  .pop label:hover { background:#f3f6f1; }
+  .pop .pn { font-size:11px; color:var(--mute); padding:4px 10px 6px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; } .dot.d-easy { background:#2e7d32; } .dot.d-moderate { background:#e8a317; } .dot.d-hard { background:#e0561d; } .dot.d-none { background:#9aa597; }
+  #mapctl { position:absolute; right:12px; top:12px; z-index:900; display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
+  #layerbox { background:#fff; border-radius:14px; padding:8px 10px 10px; box-shadow:0 2px 8px rgba(0,0,0,.28); }
+  #layerbox .lt { font-size:11px; font-weight:700; margin-bottom:6px; }
+  #layerbox .lth { display:flex; gap:6px; }
+  #layerbox button { width:38px; height:38px; border-radius:9px; border:2px solid transparent; cursor:pointer; padding:0; }
+  #layerbox button.on { border-color:var(--dark); }
+  #layerbox button[data-layer=streets] { background:linear-gradient(135deg,#f0ece3 0 45%,#fff 45% 55%,#cfe3f2 55%); }
+  #layerbox button[data-layer=sat] { background:linear-gradient(135deg,#2b4a2f,#1d3a4d 60%,#5b6b3a); }
+  #layerbox button[data-layer=topo] { background:repeating-radial-gradient(circle at 60% 55%,#e4d9b8 0 4px,#cdbf94 4px 6px); }
+  /* pins and clusters */
+  .pin1 { width:15px; height:15px; border-radius:50%; background:#fff; border:2px solid #3a463a; box-shadow:0 1px 3px rgba(0,0,0,.35); box-sizing:border-box; cursor:pointer; }
+  .pin1.sel { width:22px; height:22px; background:#4a8f2f; border:3px solid #fff; box-shadow:0 0 0 2px #1d241c, 0 2px 6px rgba(0,0,0,.4); }
+  .pinl { display:flex; align-items:center; gap:4px; cursor:pointer; }
+  .pinl span { background:#fff; border-radius:12px; padding:1px 7px; font-size:12px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.3); white-space:nowrap; }
+  .clus { background:#fff; border-radius:14px; padding:2px 9px; font-size:12px; font-weight:700; box-shadow:0 1px 5px rgba(0,0,0,.35); white-space:nowrap; text-align:center; cursor:pointer; border:1px solid #d8ddd5; }
+  #toast { position:absolute; left:50%; bottom:28px; transform:translateX(-50%); z-index:1200; background:#1d241c; color:#fff; padding:9px 16px; border-radius:22px; font-size:13px; display:none; max-width:80%; }
+  #toast.err { background:#b3261e; }
+  /* buttons that belong to the open walk sit under the filters */
+  #revbtn, #editbtn { top:auto; right:12px; bottom:28px; z-index:900; padding:9px 16px; border-radius:22px; }
+  #editbtn { bottom:72px; }
+  #livebar { left:calc(50% + 200px); top:64px; }
+  #legend { bottom:24px; left:calc(50% + 200px); }
+  #editor { left:12px; top:12px; bottom:12px; }
+  body.editing #side { display:none; }
+  /* walk page (opens in the panel, like a trail page) */
+  #info { position:static; display:none; width:auto; max-height:none; flex:1; min-height:0; overflow:auto; background:#fff; border-radius:0; box-shadow:none; font-size:14px; padding:0 18px 80px; }
+  body.detail #info { display:block !important; }
+  body.editing #info { display:none !important; }
+  #dTop { position:sticky; top:0; background:#fff; z-index:5; display:flex; justify-content:space-between; padding:14px 0 8px; }
+  #dBody h1 { font-size:22px; margin:6px 0 4px; font-weight:600; letter-spacing:-.2px; line-height:1.2; }
+  #dBody .sub2 { font-size:13px; color:var(--mute); display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .pills { display:flex; gap:8px; margin:12px 0; flex-wrap:wrap; }
+  .pills button { border:0; background:#eef1ec; border-radius:20px; padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; color:var(--ink); display:flex; align-items:center; gap:7px; }
+  .pills button.round { padding:9px 12px; width:40px; justify-content:center; }
+  .pills button.on { background:#e3efd9; color:#2f5a1f; }
+  .menu { position:absolute; background:#fff; border-radius:12px; box-shadow:0 6px 24px rgba(0,0,0,.3); padding:6px; z-index:20; min-width:230px; }
+  .menu button { display:block; width:100%; text-align:left; border:0; background:none; padding:9px 12px; font-size:14px; border-radius:8px; cursor:pointer; color:var(--ink); }
+  .menu button:hover { background:#f3f6f1; } .menu .del2 { color:#b3261e; }
+  .pgrid { display:grid; grid-template-columns:2fr 1fr; grid-template-rows:100px 100px; gap:5px; margin:6px 0 4px; border-radius:12px; overflow:hidden; }
+  .pgrid a { display:block; overflow:hidden; background:#dfe5da; } .pgrid a:first-child { grid-row:1 / 3; }
+  .pgrid img { width:100%; height:100%; object-fit:cover; display:block; }
+  .pgrid.one { grid-template-columns:1fr; grid-template-rows:190px; } .pgrid.one a:first-child { grid-row:auto; }
+  .pcred { font-size:11px; color:var(--mute); margin-bottom:6px; }
+  .stats { display:grid; grid-template-columns:repeat(4, auto); justify-content:space-between; gap:6px; margin:16px 0 14px; }
+  .stats div b { display:block; font-size:17px; font-weight:600; } .stats div span { font-size:12px; color:var(--mute); }
+  .fchips { display:flex; flex-wrap:wrap; gap:7px; margin:6px 0 12px; }
+  .fchips span { border:1px solid #d8ddd5; border-radius:7px; padding:5px 10px; font-size:13px; }
+  .fchips span.warn { border-color:#c62828; color:#c62828; font-weight:600; }
+  .desc { font-size:14px; line-height:1.5; margin:8px 0; } .desc.clamp { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+  .desc + .lnk { margin-bottom:8px; }
+  #dMore .sec, #dBody .sec { font-size:17px; font-weight:600; margin:18px 0 6px; }
+  #elev { position:static; display:none; background:transparent; border-radius:0; box-shadow:none; padding:0; margin:4px 0 2px; }
+  #elev::before { content:'Elevation'; display:block; font-size:17px; font-weight:600; margin:16px 0 4px; }
+  #elev .elx { display:none; }
+  #elev.float { position:absolute; left:12px; right:12px; bottom:22px; z-index:900; background:#fff; border-radius:18px; box-shadow:0 2px 10px rgba(0,0,0,.3); padding:8px 12px 4px; margin:0; }
+  #elev.float::before { display:none; } #elev.float .elx { display:block; }
+  #dFoot { position:sticky; bottom:0; margin:0 -18px; padding:10px 18px 14px; background:linear-gradient(rgba(255,255,255,0), #fff 30%); }
+  #dFoot button { width:100%; background:var(--dark); color:#fff; border:0; border-radius:28px; padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
+  #dMore .wnow { font-size:15px; font-weight:600; }
+  #info .sub { color:var(--mute); font-size:12px; }
+  @media (max-width:800px) {
+    #side { left:8px; right:8px; top:auto; bottom:8px; width:auto; height:52vh; }
+    #chipbar { left:8px; right:62px; top:8px; flex-wrap:nowrap; overflow-x:auto; }
+    #mapctl { top:8px; right:8px; } #layerbox { display:none; }
+    #livebar, #legend { left:50%; } #legend { bottom:calc(52vh + 20px); }
+    #revbtn { bottom:calc(52vh + 20px); } #editbtn { bottom:calc(52vh + 64px); }
+    .pop { position:fixed; left:12px; right:12px; top:60px; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>🥾 Walkbox</h1>
-  <nav>
-    <button id="tabFind" class="active">Find walks</button>
-    <button id="tabBox">My walk box</button>
-    <button id="tabData">Data</button>
-  </nav>
-</header>
 <main>
-  <section id="side">
-    <div id="findTools" class="tools">
-      <input type="text" id="place" placeholder="Walk name (all NZ) or place, e.g. North Head">
-      <button class="b alt" id="goBtn" title="Move the map to this place">Go to place</button>
-      <button class="b" id="searchBtn" style="width:100%">Find walks in this map view</button>
-      <label class="src"><input type="checkbox" id="srcDoc" checked> DOC tracks (NZ)</label>
-      <label class="src"><input type="checkbox" id="srcNz" checked> NZ council tracks</label>
-      <label class="src"><input type="checkbox" id="srcRoutes" checked> Official routes</label>
-      <label class="src"><input type="checkbox" id="srcPaths" checked> Named paths</label>
-    </div>
-    <div id="boxTools" class="tools" style="display:none">
-      <input type="text" id="q" placeholder="Search your walks (name, place, operator…)">
-      <input type="number" id="minKm" placeholder="min km" min="0" step="0.5">
-      <input type="number" id="maxKm" placeholder="max km" min="0" step="0.5">
-      <select id="sort">
-        <option value="added">Newest added</option>
-        <option value="name">Name A–Z</option>
-        <option value="longest">Longest</option>
-        <option value="shortest">Shortest</option>
-      </select>
-      <button class="b alt" id="zipBtn">Download all (.zip)</button>
-      <button class="b alt" id="importBtn">Import GPX</button>
-      <input type="file" id="importFile" accept=".gpx,application/gpx+xml" multiple style="display:none">
-    </div>
-    <div id="findActions" class="tools" style="display:none">
-      <button class="b" id="addSelBtn">Add selected to my box</button>
-      <button class="b alt" id="selAllBtn">Select all</button>
-    </div>
-    <div id="dataPanel" style="display:none">
-      <div class="dp-h">One-off downloads for all of New Zealand</div>
-      <div id="dataItems"><div class="dp-note">Loading…</div></div>
-      <div class="tools">
-        <button class="b" id="dataGo">Download selected</button>
-        <button class="b alt" id="dataStop">Cancel</button>
-      </div>
-      <div class="dp-note">Downloads run in the background and carry on if you close this page or Walkbox restarts. Walks stored here are found instantly in Find, and routes open without waiting for OpenStreetMap.
-        Routing tiles and the Overpass database are built by their own containers; this page only shows how far they have got.</div>
-    </div>
-    <div id="status">Finding your location…</div>
-    <div id="list"></div>
-    <div class="foot">Route data © OpenStreetMap contributors (ODbL). Check conditions before you walk.</div>
-  </section>
   <div id="mapwrap">
     <div id="map"></div>
+    <div id="chipbar">
+      <button class="cb" id="chAll" title="Clear all filters"><span class="ico">☰</span><span id="chAllN"></span> All</button>
+      <div class="cw"><button class="cb" data-pop="difficulty">Difficulty <span class="car">▾</span></button>
+        <div class="pop" id="pop-difficulty">
+          <label><input type="checkbox" data-diff="easy" checked> <i class="dot d-easy"></i> Easy</label>
+          <label><input type="checkbox" data-diff="moderate" checked> <i class="dot d-moderate"></i> Moderate</label>
+          <label><input type="checkbox" data-diff="hard" checked> <i class="dot d-hard"></i> Hard</label>
+          <label><input type="checkbox" data-diff="unrated" checked> <i class="dot d-none"></i> Not rated</label>
+        </div></div>
+      <div class="cw"><button class="cb" data-pop="length">Length <span class="car">▾</span></button>
+        <div class="pop" id="pop-length">
+          <label><input type="radio" name="len" value="any" checked> Any length</label>
+          <label><input type="radio" name="len" value="lt2"> Under 2 km</label>
+          <label><input type="radio" name="len" value="2-5"> 2 – 5 km</label>
+          <label><input type="radio" name="len" value="5-10"> 5 – 10 km</label>
+          <label><input type="radio" name="len" value="10+"> 10 km or more</label>
+        </div></div>
+      <div class="cw"><button class="cb" data-pop="elevation">Elevation <span class="car">▾</span></button>
+        <div class="pop" id="pop-elevation">
+          <label><input type="radio" name="elev" value="any" checked> Any climb</label>
+          <label><input type="radio" name="elev" value="flat"> Flat (under 50 m)</label>
+          <label><input type="radio" name="elev" value="gentle"> Gentle (50 – 150 m)</label>
+          <label><input type="radio" name="elev" value="steep"> Steep (over 150 m)</label>
+          <div class="pn">Walks whose climb is not known yet are always shown.</div>
+        </div></div>
+      <div class="cw"><button class="cb" data-pop="features">Features <span class="car">▾</span></button>
+        <div class="pop" id="pop-features">
+          <label><input type="checkbox" data-feat="dogs"> Dogs allowed</label>
+          <label><input type="checkbox" data-feat="wheelchair"> Wheelchair friendly</label>
+          <label><input type="checkbox" data-feat="loop"> Loop</label>
+          <label><input type="checkbox" data-feat="open"> Not closed</label>
+        </div></div>
+      <div class="cw"><button class="cb" data-pop="sources">Sources <span class="car">▾</span></button>
+        <div class="pop" id="pop-sources">
+          <label><input type="checkbox" id="srcDoc" checked> DOC tracks (NZ)</label>
+          <label><input type="checkbox" id="srcNz" checked> NZ council tracks</label>
+          <label><input type="checkbox" id="srcRoutes" checked> Official routes</label>
+          <label><input type="checkbox" id="srcPaths" checked> Named paths</label>
+          <div class="pn">Used the next time you search.</div>
+        </div></div>
+    </div>
+    <div id="mapctl">
+      <div id="layerbox">
+        <div class="lt">Map layers</div>
+        <div class="lth">
+          <button data-layer="streets" class="on" title="Streets"></button>
+          <button data-layer="sat" title="Satellite"></button>
+          <button data-layer="topo" title="Topographic"></button>
+        </div>
+      </div>
+      <button class="rbtn" id="zin" title="Zoom in">+</button>
+      <button class="rbtn" id="zout" title="Zoom out">−</button>
+      <button class="rbtn" id="locBtn" title="My location">➤</button>
+    </div>
     <div id="livebar"></div>
     <div id="legend"></div>
-    <div id="elev"></div>
-    <div id="info"></div>
+    <div id="toast"></div>
     <button id="editbtn" title="Trim, reroute, draw or rename this walk, then save it to your box">✎ Customise</button>
     <div id="editor"></div>
     <button id="revbtn" title="Walk it the other way round: the start and end swap places">⇄ Swap start / end</button>
+    <button id="openSide" class="rbtn" title="Show the list">☰</button>
   </div>
+  <aside id="side">
+    <div class="sh"><h2 id="sideTitle">Explore trails</h2><button id="collapseBtn" class="rbtn sm" title="Hide the list">⌃</button></div>
+    <div class="seg">
+      <button id="tabFind" class="active">Explore</button>
+      <button id="tabBox">My walk box</button>
+      <button id="tabData">Data</button>
+    </div>
+    <div id="lv">
+      <div id="findTools" class="tools">
+        <div class="sbox"><span class="mag">⌕</span><input type="text" id="place" placeholder="Search walks by name, or go to a place"><button id="goBtn" title="Move the map to this place">Go to place</button></div>
+        <button class="b" id="searchBtn">Find walks in this map view</button>
+      </div>
+      <div id="boxTools" class="tools" style="display:none">
+        <div class="sbox"><span class="mag">⌕</span><input type="text" id="q" placeholder="Search your walks (name, place, operator…)"></div>
+        <input type="number" id="minKm" placeholder="min km" min="0" step="0.5">
+        <input type="number" id="maxKm" placeholder="max km" min="0" step="0.5">
+        <select id="sort">
+          <option value="added">Newest added</option>
+          <option value="name">Name A–Z</option>
+          <option value="longest">Longest</option>
+          <option value="shortest">Shortest</option>
+        </select>
+        <button class="b alt" id="zipBtn">Download all (.zip)</button>
+        <button class="b alt" id="importBtn">Import GPX</button>
+        <input type="file" id="importFile" accept=".gpx,application/gpx+xml" multiple style="display:none">
+      </div>
+      <div id="dataPanel" style="display:none">
+        <div class="dp-h">One-off downloads for all of New Zealand</div>
+        <div id="dataItems"><div class="dp-note">Loading…</div></div>
+        <div class="tools">
+          <button class="b" id="dataGo">Download selected</button>
+          <button class="b alt" id="dataStop">Cancel</button>
+        </div>
+        <div class="dp-note">Downloads run in the background and carry on if you close this page or Walkbox restarts. Walks stored here are found instantly in Find, and routes open without waiting for OpenStreetMap.
+          Routing tiles and the Overpass database are built by their own containers; this page only shows how far they have got.</div>
+      </div>
+      <div id="countRow">
+        <span id="countTxt"></span>
+        <span class="cr">
+          <span id="findActions" style="display:none"><button id="selAllBtn" class="lnk">Add all to my box</button><button id="addSelBtn" style="display:none">Add selected to my box</button></span>
+          <select id="sortSel" title="Order the list">
+            <option value="rel">Most relevant</option>
+            <option value="long">Longest</option>
+            <option value="short">Shortest</option>
+            <option value="az">Name A–Z</option>
+          </select>
+        </span>
+      </div>
+      <div id="status">Finding your location…</div>
+      <div id="list"></div>
+      <div class="foot">Route data © OpenStreetMap contributors (ODbL). Check conditions before you walk.</div>
+    </div>
+    <div id="info">
+      <div id="dTop"></div>
+      <div id="dBody"></div>
+      <div id="elev"></div>
+      <div id="dMore"></div>
+      <div id="dFoot"></div>
+    </div>
+  </aside>
 </main>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -218,15 +417,128 @@ let results = [];
 let origin = null;   // the place last searched with Go: walks that end there are turned round to start there
 const selected = new Set();
 const AUCKLAND_CBD = [-36.8485, 174.7633];
-const map = L.map('map').setView(AUCKLAND_CBD, 13);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 18, attribution: '© OpenStreetMap contributors'
-}).addTo(map);
+const map = L.map('map', {zoomControl: false}).setView(AUCKLAND_CBD, 13);
+const BASES = {
+  streets: L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap contributors © CARTO'}),
+  sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom: 19, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'}),
+  topo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom: 17, subdomains: 'abc', attribution: '© OpenStreetMap contributors, SRTM | © OpenTopoMap (CC-BY-SA)'}),
+};
+let baseKey = 'streets';
+try { const k = localStorage.getItem('walkbox.base'); if (BASES[k]) baseKey = k; } catch (e) { /* storage blocked: the default is fine */ }
+BASES[baseKey].addTo(map);
 const layerGroup = L.layerGroup().addTo(map);
+const pinLayer = L.layerGroup().addTo(map);
 let lines = {};
 
 const $ = id => document.getElementById(id);
-function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
+let toastTimer = null;
+function toast(msg, err) {
+  const t = $('toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = 'none'; }, 4200);
+}
+function status(msg, err) {
+  const s = $('status'); s.textContent = msg; s.className = err ? 'err' : '';
+  if (document.body.classList.contains('detail')) toast(msg, err);       // the list is hidden while a walk is open
+}
+
+// ---- panel, map controls, layers ----
+function sideW() {
+  const s = $('side');
+  return (innerWidth <= 800 || s.classList.contains('collapsed') || document.body.classList.contains('editing')) ? 0 : s.offsetWidth + 24;
+}
+function fitOpts(maxZoom) {                       // keep the route clear of the panel and the buttons
+  const mob = innerWidth <= 800;
+  return {paddingTopLeft: [sideW() + 40, 70], paddingBottomRight: [90, mob ? $('side').offsetHeight + 30 : 40], maxZoom: maxZoom || 18, animate: false};
+}
+function layoutBars() {
+  const w = sideW(); $('chipbar').style.left = innerWidth <= 800 ? '8px' : (w ? (w + 12) + 'px' : '64px');
+  document.body.classList.toggle('sidehidden', $('side').classList.contains('collapsed'));
+}
+$('collapseBtn').onclick = () => { $('side').classList.add('collapsed'); layoutBars(); };
+$('openSide').onclick = () => { $('side').classList.remove('collapsed'); layoutBars(); };
+window.addEventListener('resize', layoutBars); layoutBars();
+$('zin').onclick = () => map.zoomIn(); $('zout').onclick = () => map.zoomOut();
+$('locBtn').onclick = () => map.locate({setView: true, maxZoom: 15});
+map.on('locationerror', () => toast('Could not get your location.', true));
+document.querySelectorAll('#layerbox button').forEach(b => {
+  b.classList.toggle('on', b.dataset.layer === baseKey);
+  b.onclick = () => {
+    map.removeLayer(BASES[baseKey]); baseKey = b.dataset.layer; BASES[baseKey].addTo(map);
+    document.querySelectorAll('#layerbox button').forEach(x => x.classList.toggle('on', x === b));
+    try { localStorage.setItem('walkbox.base', baseKey); } catch (e) { /* not important */ }
+  };
+});
+
+// ---- filter chips (they narrow the list that is already on screen) ----
+function diffBucket(r) {
+  const d = String(r.difficulty || (r.est && r.est.label) || '').toLowerCase();
+  if (!d) return 'unrated';
+  if (/expert|advanced|hard|tramping|challenging|route/.test(d)) return 'hard';
+  if (/intermediate|moderate|walking track/.test(d)) return 'moderate';
+  if (/easiest|easy|path|short walk/.test(d)) return 'easy';
+  return 'unrated';
+}
+function readFilters() {
+  const q = s => document.querySelector(s);
+  const diff = new Set([...document.querySelectorAll('[data-diff]:checked')].map(x => x.dataset.diff));
+  const feat = new Set([...document.querySelectorAll('[data-feat]:checked')].map(x => x.dataset.feat));
+  return {diff, feat, len: q('input[name=len]:checked').value, elev: q('input[name=elev]:checked').value};
+}
+function passes(r, f) {
+  if (!f.diff.has(diffBucket(r))) return false;
+  const km = r.distance_km;
+  if (km != null) {
+    if (f.len === 'lt2' && !(km < 2)) return false;
+    if (f.len === '2-5' && !(km >= 2 && km < 5)) return false;
+    if (f.len === '5-10' && !(km >= 5 && km < 10)) return false;
+    if (f.len === '10+' && !(km >= 10)) return false;
+  }
+  const up = r.ascent_m;
+  if (up != null) {
+    if (f.elev === 'flat' && !(up < 50)) return false;
+    if (f.elev === 'gentle' && !(up >= 50 && up <= 150)) return false;
+    if (f.elev === 'steep' && !(up > 150)) return false;
+  }
+  if (f.feat.has('dogs') && !['allowed', 'off lead', 'on lead only'].includes(r.dogs)) return false;
+  if (f.feat.has('wheelchair') && r.wheelchair !== 'yes') return false;
+  if (f.feat.has('loop') && r.route_type !== 'Loop') return false;
+  if (f.feat.has('open') && r.status) return false;
+  return true;
+}
+function shown() {
+  const f = readFilters(), mode2 = $('sortSel').value;
+  const out = results.filter(r => passes(r, f));
+  if (mode2 === 'long') out.sort((a, b) => (b.distance_km || 0) - (a.distance_km || 0));
+  else if (mode2 === 'short') out.sort((a, b) => (a.distance_km == null) - (b.distance_km == null) || (a.distance_km || 0) - (b.distance_km || 0));
+  else if (mode2 === 'az') out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+function paintChips() {
+  const f = readFilters();
+  const on = {difficulty: f.diff.size < 4, length: f.len !== 'any', elevation: f.elev !== 'any', features: f.feat.size > 0,
+              sources: !['srcDoc', 'srcNz', 'srcRoutes', 'srcPaths'].every(id => $(id).checked)};
+  document.querySelectorAll('[data-pop]').forEach(b => b.classList.toggle('on', !!on[b.dataset.pop]));
+  const n = Object.entries(on).filter(([k, v]) => v && k !== 'sources').length;
+  $('chAllN').textContent = n ? n + ' · ' : '';
+}
+document.querySelectorAll('[data-pop]').forEach(b => {
+  b.onclick = e => {
+    e.stopPropagation();
+    const pop = $('pop-' + b.dataset.pop), open = pop.classList.contains('open');
+    document.querySelectorAll('.pop.open').forEach(p => p.classList.remove('open'));
+    if (!open) pop.classList.add('open');
+  };
+});
+document.querySelectorAll('.pop').forEach(p => p.addEventListener('click', e => e.stopPropagation()));
+document.addEventListener('click', () => { document.querySelectorAll('.pop.open').forEach(p => p.classList.remove('open')); document.querySelectorAll('.menu').forEach(m => m.remove()); });
+document.querySelectorAll('#chipbar input').forEach(i => i.addEventListener('change', () => { paintChips(); if (mode !== 'data') render(true); }));
+$('chAll').onclick = () => {
+  document.querySelectorAll('[data-diff]').forEach(x => x.checked = true);
+  document.querySelectorAll('[data-feat]').forEach(x => x.checked = false);
+  document.querySelector('input[name=len][value=any]').checked = true; document.querySelector('input[name=elev][value=any]').checked = true;
+  paintChips(); if (mode !== 'data') render(true);
+};
+$('sortSel').onchange = () => render(true);
 
 const FIND_KEY = 'walkbox.find.v1', FIND_MAX_AGE = 6 * 3600 * 1000;
 function persistFind() {                    // the light list only: routes are fetched again (instantly, from the server cache) when opened
@@ -259,6 +571,8 @@ function setMode(m) {
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
   $('tabData').classList.toggle('active', m === 'data');
+  $('sideTitle').textContent = {find: 'Explore trails', box: 'My walk box', data: 'Data & downloads'}[m];
+  $('countRow').style.display = m === 'data' ? 'none' : ''; $('sortSel').style.display = m === 'box' ? 'none' : '';
   $('dataPanel').style.display = m === 'data' ? '' : 'none';
   $('status').style.display = $('list').style.display = m === 'data' ? 'none' : '';
   if (m === 'data') { ['findTools', 'boxTools', 'findActions'].forEach(i => $(i).style.display = 'none'); selected.clear(); layerGroup.clearLayers(); results = []; render(); startDataPoll(); return; }
@@ -387,7 +701,7 @@ async function runSearch() {
   results = []; selected.clear(); render();      // a new search starts from an empty list
   const state = {}, bySource = {}, warnings = [];
   want.forEach(x => state[x[0]] = '…');
-  const show = done => status((done ? 'Done. ' : 'Searching: ') + want.map(x => x[1] + ' ' + state[x[0]]).join(' · ') + (done ? '' : ' (results appear as each source answers)'));
+  const show = done => status((done ? '' : 'Searching: ') + want.map(x => x[1] + ' ' + state[x[0]]).join(' · ') + (done ? '' : ' (results appear as each source answers)'));
   show(false);
   let capped = false;
   await Promise.all(want.map(async ([key, label]) => {
@@ -414,7 +728,7 @@ async function runSearch() {
   window.setTimeout(() => { if (mode === 'find') saveFindState(); }, 50);
   const warn = warnings.length ? ' Note: ' + warnings.join(' | ') : '';
   show(true);
-  status($('status').textContent + ' ' + (results.length ? results.length + ' walks' + (capped ? ' (list capped, zoom in for more)' : '') + '. Click a walk to load its route.' : 'No walks found here. Try another area or turn on more sources.') + warn, !!warn && !results.length);
+  status((results.length ? (capped ? 'List capped: zoom in for more. ' : '') + 'Tap a walk to see its route.' : 'No walks found here. Try another area or turn on more sources (Sources on the map).') + warn, !!warn && !results.length);
 }
 // Search by walk name across all of NZ: not limited to the map view
 async function runNameSearch() {
@@ -434,7 +748,7 @@ async function runNameSearch() {
     results = j.results; render(true);
     $('findActions').style.display = results.length ? '' : 'none';
     const notes = (j.notes || []).concat(j.warnings || []);
-    status((results.length ? results.length + ' walks match “' + q + '” anywhere in NZ' + (j.capped ? ' (list capped, type more of the name)' : '') + '. Click a walk to load its route and see it on the map.'
+    status((results.length ? 'Matches for “' + q + '” anywhere in NZ' + (j.capped ? ' (list capped, type more of the name)' : '') + '. Tap a walk to see its route.'
                             : 'No walk has “' + q + '” in its name.') + (notes.length ? ' ' + notes.join(' | ') : ''), !results.length && !!(j.warnings || []).length);
     const first = results.find(r => r.lat != null && r.lon != null); if (first) map.setView([first.lat, first.lon], 12, {animate: false});
   } catch (e) {
@@ -445,9 +759,9 @@ async function runNameSearch() {
 }
 $('searchBtn').onclick = searchClick;
 
-$('selAllBtn').onclick = () => { results.filter(r => !r.added).forEach(r => selected.add(r.osm_id)); render(); };
+$('selAllBtn').onclick = () => { shown().filter(r => !r.added).forEach(r => selected.add(r.osm_id)); $('addSelBtn').onclick(); };
 $('addSelBtn').onclick = async () => {
-  if (!selected.size) { status('Tick the walks you want first.', true); return; }
+  if (!selected.size) { status('Everything shown is already in your box.', true); return; }
   $('addSelBtn').disabled = true; status('Adding…');
   try {
     const j = await post('/api/walks', {ids:[...selected], place: window._place || null, reverse: results.filter(r => selected.has(r.osm_id) && r.reversed).map(r => r.osm_id)});
@@ -681,13 +995,15 @@ let ed = null;    // the walk being customised (see the editor below)
 function clearSelection() {
   if (ed) endEdit(false);
   $('editbtn').style.display = 'none'; $('legend').style.display = 'none';
-  const inf = $('info'); inf.style.display = 'none'; inf.textContent = ''; $('revbtn').style.display = 'none';
-  if (!sel) return;
+  ['dTop', 'dBody', 'dMore', 'dFoot'].forEach(id => $(id).textContent = ''); $('revbtn').style.display = 'none';
+  document.body.classList.remove('detail');
+  if (!sel) { drawPins(); return; }
   if (sel.watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(sel.watchId);
   sel.layers.forEach(l => map.removeLayer(l));
   if (lines[sel.r.osm_id]) lines[sel.r.osm_id].setStyle({opacity: .8});
   sel = null;
   $('elev').style.display = 'none'; $('elev').textContent = ''; $('livebar').style.display = 'none';
+  drawPins();
 }
 function drawArrows(s) {   // direction arrows roughly every 90 px, so they stay sparse at any zoom
   s.arrows.clearLayers();
@@ -705,17 +1021,18 @@ function selectWalk(r) {
   const chain = r.line && r.line[0]; if (!chain || chain.length < 2) return;
   const s = sel = {r, chain, cum: cumDist(chain), layers: [], routeLayers: [], watchId: null, me: null, acc: null, hover: null, profile: null, chart: null};
   if (lines[r.osm_id]) lines[r.osm_id].setStyle({opacity: 0});
+  document.body.classList.add('detail'); $('info').scrollTop = 0; drawPins();
   const add = l => { l.addTo(map); s.layers.push(l); return l; };
   const addR = l => { add(l); s.routeLayers.push(l); return l; };   // the styled route, hidden while editing
   const icon = (html, size) => L.divIcon({className: '', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2]});
   const opts = {lineCap: 'round', lineJoin: 'round', interactive: false};
-  const paths = r.line.map(c => addR(L.polyline(c, Object.assign({color: '#263238', weight: 11, opacity: 1}, opts))));
+  const paths = r.line.map(c => addR(L.polyline(c, Object.assign({color: '#ffffff', weight: 11, opacity: .95}, opts))));
   r.line.forEach((c, k) => { const f = addR(L.polyline(c, Object.assign({color: '#66bb6a', weight: 7, opacity: 1}, opts))); if (k === 0) s.mainFill = f; });
   const total = s.cum[s.cum.length - 1];
   s.arrows = addR(L.layerGroup());
   addR(L.marker(chain[0], {icon: icon('<div class="pin start"></div>', 20), interactive: false, keyboard: false}));
   addR(L.marker(chain[chain.length - 1], {icon: icon('<div class="pin end">⚑</div>', 20), interactive: false, keyboard: false}));
-  map.fitBounds(L.featureGroup(paths).getBounds(), {paddingTopLeft: [40, 50], paddingBottomRight: [40, 150], animate: false});
+  map.fitBounds(L.featureGroup(paths).getBounds(), fitOpts());
   drawArrows(s);
   $('editbtn').style.display = 'block';
   const rb = $('revbtn'); rb.style.display = 'block'; rb.className = r.reversed ? 'on' : ''; rb.textContent = r.reversed ? '⇄ Reversed: tap to restore' : '⇄ Swap start / end';
@@ -892,17 +1209,19 @@ function startEdit() {
   ed.wps = [{lat: orig[0][0], lon: orig[0][1], split: false}, {lat: orig[orig.length - 1][0], lon: orig[orig.length - 1][1], split: false}];
   ed.legs = [orig.map(p => p.slice())];
   sel.routeLayers.forEach(l => map.removeLayer(l));
-  ['info', 'revbtn', 'editbtn', 'legend'].forEach(id => $(id).style.display = 'none');
+  ['revbtn', 'editbtn', 'legend'].forEach(id => $(id).style.display = 'none');
+  document.body.classList.add('editing'); elevFloat(true);
   buildEditor(); setTool('reshape');
 }
 function endEdit(restore) {
   if (!ed) return;
+  document.body.classList.remove('editing'); elevFloat(false);
   const e = ed; ed = null; clearTimeout(e.ptimer); map.removeLayer(e.layer); $('editor').style.display = 'none'; $('editor').textContent = '';
   const dlg = $('savedlg'); if (dlg) dlg.remove();
   if (sel && sel === e.s) {
     sel.chain = e.origChain; sel.cum = e.origCum; sel.profile = e.origProfile;
     sel.routeLayers.forEach(l => l.addTo(map));
-    if (restore) { showLegend(sel); $('info').style.display = 'block'; $('revbtn').style.display = 'block'; $('editbtn').style.display = 'block'; if (sel.profile) { $('elev').style.display = 'block'; drawProfile(sel); } }
+    if (restore) { showLegend(sel); $('revbtn').style.display = 'block'; $('editbtn').style.display = 'block'; if (sel.profile) { $('elev').style.display = 'block'; drawProfile(sel); } }
   }
 }
 function buildEditor() {
@@ -1076,68 +1395,130 @@ function renderPlaces(box, s, data) {
   const at = document.createElement('div'); at.className = 'sub'; at.style.marginTop = '4px';
   at.textContent = 'Places within a short distance of the route, from OpenStreetMap. They may be closed or out of date. Tap one for details.'; box.appendChild(at);
 }
-// ---- "At a glance": the facts a planning app shows first, plus save / share / complete
+// ---- The walk page: opens in the panel, like a trail page ----
 const DOG_LABEL = {'off lead': ['ok', 'Dogs off lead'], 'on lead only': ['ok', 'Dogs on lead only'], 'allowed': ['ok', 'Dogs allowed'],
                    'permit required': ['unk', 'Dogs: permit needed'], 'prohibited at times': ['unk', 'Dogs banned at times'], 'not allowed': ['no', 'No dogs allowed']};
 const WC_LABEL = {yes: ['ok', 'Wheelchair friendly'], limited: ['unk', 'Partly wheelchair friendly'], no: ['no', 'Not wheelchair friendly']};
+function syncCard(r) {
+  const row = $('w' + r.osm_id); if (!row) return;
+  const h = row.querySelector('.heart');
+  if (h) { h.classList.toggle('on', !!r.added); h.textContent = r.added ? '♥' : '♡'; h.title = r.added ? 'Saved in my box: tap to remove' : 'Save to my box'; }
+}
 async function addOne(r) {
   if (r.added) return;
   await post('/api/walks', {ids: [r.osm_id], place: window._place || null, reverse: r.reversed ? [r.osm_id] : []});
-  r.added = true;
-  const row = $('w' + r.osm_id), tt = row && row.querySelector('.t');
-  if (tt && !tt.querySelector('.badge')) { const bd = document.createElement('span'); bd.className = 'badge'; bd.textContent = 'in box'; tt.appendChild(bd); }
+  r.added = true; syncCard(r); toast('Saved to your box');
+}
+async function removeOne(r) {
+  if (!confirm('Remove this walk from your box?')) return;
+  await fetch('/api/walks/' + r.osm_id, {method: 'DELETE'});
+  r.added = false; r.done = false; syncCard(r);
+  if (mode === 'box') { if (sel && sel.r.osm_id === r.osm_id) clearSelection(); loadBox(); }
 }
 async function shareWalk(s) {
   const r = s.r, st = s.chain[0];
   const text = r.name + (r.distance_km != null ? ' · ' + r.distance_km.toFixed(1) + ' km' : '') + (r.difficulty ? ' · ' + r.difficulty : '') +
     '\nStart: https://www.google.com/maps/search/?api=1&query=' + st[0].toFixed(5) + ',' + st[1].toFixed(5) + (r.link ? '\nMore info: ' + r.link : '');
   if (navigator.share) { try { await navigator.share({title: r.name, text}); return ''; } catch (e) { if (e.name === 'AbortError') return ''; } }
-  try { await navigator.clipboard.writeText(text); return 'Copied'; } catch (e) { window.prompt('Copy this to share:', text); return ''; }
+  try { await navigator.clipboard.writeText(text); return 'Copied to the clipboard'; } catch (e) { window.prompt('Copy this to share:', text); return ''; }
 }
-function buildFacts(s) {
-  const r = s.r, wrap = document.createElement('div');
-  const grid = document.createElement('div'); grid.className = 'facts'; wrap.appendChild(grid);
-  const tile = (icon, text, cls, onclick, id) => {
-    const d = document.createElement('div'); d.className = 'fact ' + cls; if (id) d.id = id;
-    const i = document.createElement('i'); i.textContent = icon; const sp = document.createElement('span'); sp.textContent = text;
-    d.append(i, sp); if (onclick) { d.onclick = onclick; d.title = text; } grid.appendChild(d); return d;
-  };
-  const redo = () => { const fresh = buildFacts(s); wrap.replaceWith(fresh); s.factsEl = fresh; };
-  const safely = fn => async () => { try { await fn(); } catch (e) { status(e.message, true); } redo(); };
-  tile(r.added ? '♥' : '♡', r.added ? 'In my box' : 'Add to my box', 'act', safely(() => addOne(r)));
-  const sh = tile('⤴', 'Share track', 'act', async () => { const m = await shareWalk(s); if (m) sh.querySelector('span').textContent = m; });
-  tile(r.done ? '☑' : '☐', r.done ? 'Completed' : 'Mark as complete', 'act', safely(async () => {
-    await addOne(r);
-    const j = await fetch('/api/walks/' + r.osm_id + '/done', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({done: !r.done})}).then(x => x.json());
-    if (j.error) throw new Error(j.error); r.done = j.done; r.done_at = j.done_at;
-  }));
-  if (r.distance_km != null) tile('↗', (r.approx ? '~' : '') + r.distance_km.toFixed(2) + ' km', '');
-  if (r.time_range) tile('⏱', r.time_range, '');
-  tile('🥾', r.difficulty || (s.terrain && s.terrain.difficulty ? s.terrain.difficulty.label + ' (est.)' : 'Difficulty: working it out'), '', null, 'fact-diff');
-  const wc = WC_LABEL[r.wheelchair]; tile('♿', wc ? wc[1] : 'Wheelchair access unknown', wc ? wc[0] : 'unk');
-  const dg = DOG_LABEL[r.dogs]; tile('🐕', dg ? dg[1] : 'Dog rules unknown', dg ? dg[0] : 'unk');
-  if (r.status) tile('⚠', r.status, 'warn');
-  if (r.alerts_url) { const a = document.createElement('a'); a.className = 'alertbtn'; a.href = r.alerts_url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '⚠ View current alerts'; wrap.appendChild(a); }
-  if (r.conditions) { const c = document.createElement('div'); c.className = 'cond'; c.textContent = r.conditions.slice(0, 220); wrap.appendChild(c); }
-  return wrap;
+function gainOf(p) {                                   // total climb from the elevation profile, ignoring small wobbles
+  let up = 0, last = p.elev_m[0];
+  for (let i = 1; i < p.elev_m.length; i++) { if (p.elev_m[i] - last >= 1.5) { up += p.elev_m[i] - last; last = p.elev_m[i]; } else if (p.elev_m[i] < last) last = p.elev_m[i]; }
+  return Math.round(up);
 }
-
+function updateStats(s) {
+  if (!s || !s.gainEl || sel !== s) return;
+  const g = s.r.ascent_m != null ? Math.round(s.r.ascent_m) : (s.profile ? gainOf(s.profile) : null);
+  s.gainEl.textContent = g != null ? g + ' m' : '…';
+}
+const ROUTE_ICON = {'Loop': '⟲', 'Out and back': '⇄', 'Point to point': '→'};
 function loadInfo(s) {
-  const el = $('info'); el.style.display = 'block'; el.textContent = '';
-  const head = document.createElement('div'); head.className = 'ih';
-  const ttl = document.createElement('span'); ttl.textContent = 'At a glance · weather · nearby'; const arrow = document.createElement('span');
-  head.append(ttl, arrow);
-  const body = document.createElement('div'); body.className = 'ib';
-  const setOpen = o => { infoOpen = o; body.style.display = o ? '' : 'none'; arrow.textContent = o ? '▾' : '▸'; };
-  head.onclick = () => setOpen(!infoOpen); setOpen(infoOpen);
-  el.append(head, body);
-  const dbox = document.createElement('div'); dbox.id = 'diffbox'; dbox.className = 'sub'; dbox.textContent = 'Estimating difficulty…'; dbox.style.marginBottom = '6px';
-  const wbox = document.createElement('div'); wbox.textContent = 'Loading weather…'; wbox.className = 'sub';
-  const sec = document.createElement('div'); sec.className = 'sec'; sec.textContent = 'Along the route';
-  const pbox = document.createElement('div'); pbox.textContent = 'Looking for cafés, water, toilets and rest spots…'; pbox.className = 'sub';
-  s.factsEl = buildFacts(s);
-  body.append(s.factsEl, dbox, wbox, sec, pbox);
+  const r = s.r, top = $('dTop'), body = $('dBody'), more = $('dMore'), foot = $('dFoot');
+  [top, body, more, foot].forEach(e => e.textContent = '');
+  const mk = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+  // top bar
+  const back = mk('button', 'rbtn sm', '←'); back.title = 'Back to the list'; back.onclick = () => clearSelection();
+  const shTop = mk('button', 'rbtn sm', '⤴'); shTop.title = 'Share';
+  const doShare = async () => { const m = await shareWalk(s); if (m) toast(m); };
+  shTop.onclick = doShare; top.append(back, shTop);
+  // title
+  body.appendChild(mk('h1', '', r.name));
+  const sub = mk('div', 'sub2'); const bk = diffBucket(r), dt = diffText(r);
+  const dot = mk('i', 'dot d-' + (bk === 'unrated' ? 'none' : bk)); sub.append(dot, mk('span', '', dt || 'Not rated'));
+  [r.source_label, r.region].filter(Boolean).forEach(x => { sub.append('·', mk('span', '', x)); });
+  if (r.done) sub.append('·', mk('span', 'badge', '✓ Completed'));
+  body.appendChild(sub);
+  // save / share / more
+  const pills = mk('div', 'pills');
+  const save = mk('button', r.added ? 'on' : '', (r.added ? '♥ Saved' : '♡ Save'));
+  save.onclick = async e => { e.stopPropagation(); try { r.added ? await removeOne(r) : await addOne(r); } catch (err) { status(err.message, true); } if (sel === s) loadInfo(s); };
+  const share = mk('button', '', '⤴ Share'); share.onclick = doShare;
+  const dots = mk('button', 'round', '⋯'); dots.title = 'More';
+  dots.onclick = e => {
+    e.stopPropagation();
+    if (pills.querySelector('.menu')) { pills.querySelector('.menu').remove(); return; }
+    const menu = mk('div', 'menu'); menu.style.cssText = 'top:48px;right:0'; menu.onclick = ev => ev.stopPropagation();
+    const item = (label, fn, cls) => { const b = mk('button', cls || '', label); b.onclick = async () => { menu.remove(); try { await fn(); } catch (err) { status(err.message, true); } }; menu.appendChild(b); };
+    item('⬇ Download GPX', downloadGpx);
+    item(r.done ? '☑ Completed: mark as not done' : '☐ Mark as complete', async () => {
+      await addOne(r);
+      const j = await fetch('/api/walks/' + r.osm_id + '/done', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({done: !r.done})}).then(x => x.json());
+      if (j.error) throw new Error(j.error); r.done = j.done; r.done_at = j.done_at; loadInfo(s); render(true);
+    });
+    item('✎ Customise this walk', () => $('editbtn').click());
+    item($('revbtn').textContent.replace('Reversed: tap to restore', 'Restore the original direction'), () => $('revbtn').click());
+    if (r.added) item('Remove from my box', () => removeOne(r), 'del2');
+    pills.appendChild(menu);
+  };
+  pills.append(save, share, dots); pills.style.position = 'relative'; body.appendChild(pills);
+  // photos from Wikimedia Commons (when there are any)
+  const phWrap = mk('div'); body.appendChild(phWrap);
+  cachedGet('/api/walks/' + r.osm_id + '/photos').then(j => {
+    if (sel !== s || !j.photos || !j.photos.length) return;
+    const list = j.photos.slice(0, 3), grid = mk('div', 'pgrid' + (list.length < 3 ? ' one' : ''));
+    list.forEach(p => { const a = mk('a'); a.href = p.page; a.target = '_blank'; a.rel = 'noopener'; a.title = (p.caption ? p.caption + ' · ' : '') + p.by + ' · ' + p.license;
+      const im = mk('img'); im.src = p.thumb; im.alt = p.caption || p.title; a.appendChild(im); grid.appendChild(a); });
+    phWrap.append(grid, mk('div', 'pcred', 'Photos from Wikimedia Commons (open licences), taken near this walk: tap one for its licence.'));
+  }).catch(() => { /* no photos: the page simply has none */ });
+  // length / climb / time / type
+  const stats = mk('div', 'stats');
+  const stat = (v, l) => { const d = mk('div'); const b = mk('b', '', v); d.append(b, mk('span', '', l)); stats.appendChild(d); return b; };
+  stat(r.distance_km != null ? (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km' : '—', 'Length');
+  s.gainEl = stat('…', 'Elevation gain');
+  stat((r.time_range || '—').replace(' (est.)', ''), 'Estimated time');
+  stat(ROUTE_ICON[r.route_type] || '·', r.route_type || 'Route');
+  body.appendChild(stats); updateStats(s);
+  // facts (only what the source really says)
+  body.appendChild(mk('div', 'sec', 'At a glance'));
+  const chips = mk('div', 'fchips');
+  const dg = DOG_LABEL[r.dogs], wc = WC_LABEL[r.wheelchair];
+  if (r.status) chips.appendChild(mk('span', 'warn', '⚠ ' + r.status));
+  if (dg) chips.appendChild(mk('span', '', dg[1])); if (wc) chips.appendChild(mk('span', '', wc[1]));
+  if (r.difficulty) chips.appendChild(mk('span', '', r.difficulty));
+  if (r.operator) chips.appendChild(mk('span', '', r.operator));
+  if (!chips.children.length) chips.appendChild(mk('span', '', 'No extra details from the source'));
+  body.appendChild(chips);
+  if (r.alerts_url) { const a = mk('a', 'alertbtn', '⚠ View current alerts'); a.href = r.alerts_url; a.target = '_blank'; a.rel = 'noopener'; body.appendChild(a); }
+  if (r.conditions) body.appendChild(mk('div', 'cond', r.conditions.slice(0, 220)));
+  if (r.description) {
+    const d = mk('div', 'desc' + (r.description.length > 200 ? ' clamp' : ''), r.description); body.appendChild(d);
+    if (r.description.length > 200) { const more2 = mk('button', 'lnk', 'more'); more2.onclick = () => { d.classList.toggle('clamp'); more2.textContent = d.classList.contains('clamp') ? 'more' : 'less'; }; body.appendChild(more2); }
+  }
+  // below the elevation chart
+  const dbox = mk('div', 'sub'); dbox.id = 'diffbox'; dbox.textContent = 'Estimating difficulty…';
+  const wbox = mk('div', 'sub', 'Loading weather…'), pbox = mk('div', 'sub', 'Looking for cafés, water, toilets and rest spots…');
+  more.append(mk('div', 'sec', 'How hard is it?'), dbox, mk('div', 'sec', 'Weather'), wbox, mk('div', 'sec', 'Along the route'), pbox);
+  if (r.added) {
+    more.appendChild(mk('div', 'sec', 'My rating & notes'));
+    const panel = mk('div'); panel.style.display = 'none'; more.appendChild(panel);
+    togglePanel(r, mk('button'), panel, true);
+  }
+  more.appendChild(mk('div', 'sec', 'Navigate')); more.appendChild(makeNav(r));
   if (s.terrain) showDifficulty(s);
+  // download
+  const dl = mk('button', '', '⬇ Download GPX'); dl.onclick = () => downloadGpx().catch(e => status(e.message, true)); foot.appendChild(dl);
+  async function downloadGpx() { await addOne(r); location.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); }
   const mid = pointAt(s.chain, s.cum, s.cum[s.cum.length - 1] / 2);
   cachedGet('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4))
     .then(w => { if (sel === s) { wbox.textContent = ''; wbox.className = ''; renderWeather(wbox, w); } })
@@ -1146,6 +1527,11 @@ function loadInfo(s) {
     .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, s.r.reversed ? reversePlaces(d) : d); } })
     .catch(e => { if (sel === s) pbox.textContent = e.message; });
 }
+function elevFloat(on) {                                // while editing, the profile floats over the map again
+  const el = $('elev');
+  if (on) { $('mapwrap').appendChild(el); el.classList.add('float'); }
+  else { el.classList.remove('float'); $('info').insertBefore(el, $('dMore')); }
+}
 
 async function loadProfile(s) {
   const el = $('elev'); el.style.display = 'block'; el.textContent = '';
@@ -1153,7 +1539,7 @@ async function loadProfile(s) {
   try {
     const j = await cachedGet('/api/walks/' + s.r.osm_id + '/profile');
     if (sel !== s) return;
-    s.profile = s.r.reversed ? reverseProfile(j) : j; drawProfile(s); if (s.along !== undefined && s.along !== null) setProgress(s);
+    s.profile = s.r.reversed ? reverseProfile(j) : j; drawProfile(s); updateStats(s); if (s.along !== undefined && s.along !== null) setProgress(s);
   } catch (e) { if (sel === s) { msg.textContent = e.message; addClose(el); } }
 }
 function addClose(el) { const x = document.createElement('button'); x.className = 'elx'; x.textContent = '×'; x.title = 'Close'; x.onclick = clearSelection; el.appendChild(x); }
@@ -1258,7 +1644,7 @@ function makeNav(r) {
   return wrap;
 }
 
-async function togglePanel(r, btn, panel) {
+async function togglePanel(r, btn, panel, notesOnly) {
   if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
   panel.style.display = ''; panel.className = 'gpanel'; panel.onclick = e => e.stopPropagation();
   if (panel.dataset.loaded) return;
@@ -1280,6 +1666,7 @@ async function togglePanel(r, btn, panel) {
     } catch (e) { msg.textContent = e.message; }
   };
   panel.append(stars, ta, save, msg);
+  if (notesOnly) { panel.dataset.loaded = '1'; return; }
   // --- photos from Wikimedia Commons
   const photos = document.createElement('div'); photos.textContent = 'Loading photos taken nearby…'; photos.style.marginTop = '8px';
   panel.appendChild(photos);
@@ -1310,66 +1697,131 @@ async function del(id) {
   await fetch('/api/walks/' + id, {method:'DELETE'}); loadBox();
 }
 
-// ---- Rendering ----
+// ---- Rendering: cards, map dots and clusters ----
+const photoMemo = new Map();      // walk id -> the photo found for its card (or null)
+const photoQueue = []; let photoBusy = 0;
+function pumpPhotos() {
+  while (photoBusy < 2 && photoQueue.length) {
+    const job = photoQueue.shift(); photoBusy++;
+    job().finally(() => { photoBusy--; pumpPhotos(); });
+  }
+}
+function paintPhoto(el, p) {
+  if (!p || !el.isConnected) return;
+  const img = document.createElement('img'); img.alt = ''; img.loading = 'lazy'; img.src = p.thumb;
+  img.title = (p.caption ? p.caption + ' · ' : '') + p.by + ' · ' + p.license + ' (Wikimedia Commons)';
+  img.onload = () => img.classList.add('in'); el.querySelector('.ph').prepend(img);
+}
+const photoObs = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return;
+  photoObs.unobserve(e.target); const el = e.target, id = el.dataset.id;
+  if (photoMemo.has(id)) { paintPhoto(el, photoMemo.get(id)); return; }
+  const r = results.find(x => x.osm_id == id); if (!r || r.lat == null || r.lon == null) return;
+  photoQueue.push(async () => {
+    try {
+      const j = await fetch('/api/photo_near?lat=' + r.lat.toFixed(5) + '&lon=' + r.lon.toFixed(5)).then(x => x.json());
+      photoMemo.set(id, j.photo || null); paintPhoto(el, j.photo);
+    } catch (err) { /* no picture: the card keeps its colour */ }
+  });
+  pumpPhotos();
+}), {rootMargin: '240px'}) : null;
+function hueOf(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
+const MOUNTAIN = '<svg viewBox="0 0 100 60" fill="#fff"><path d="M0 60 L28 14 L44 38 L62 6 L100 60 Z"/></svg>';
+function diffText(r) { return r.difficulty || (r.est ? r.est.label : null); }
+
+function makeCard(r) {
+  const item = document.createElement('div'); item.className = 'item'; item.id = 'w' + r.osm_id; item.dataset.id = r.osm_id;
+  const ph = document.createElement('div'); ph.className = 'ph';
+  const h = hueOf(r.name); ph.style.background = 'linear-gradient(135deg, hsl(' + h + ',32%,60%), hsl(' + ((h + 40) % 360) + ',34%,38%))';
+  const art = document.createElement('div'); art.className = 'art'; art.innerHTML = MOUNTAIN; art.append(r.source_label || '');
+  ph.appendChild(art);
+  const heart = document.createElement('button'); heart.className = 'heart' + (r.added ? ' on' : ''); heart.textContent = r.added ? '♥' : '♡';
+  heart.title = r.added ? 'Saved in my box: tap to remove' : 'Save to my box';
+  heart.onclick = async e => { e.stopPropagation(); try { r.added ? await removeOne(r) : await addOne(r); } catch (err) { status(err.message, true); } };
+  ph.appendChild(heart); item.appendChild(ph);
+  const t = document.createElement('div'); t.className = 'ct'; t.textContent = r.name; item.appendChild(t);
+  const sub = [r.region || r.place, r.operator && r.operator !== r.region ? r.operator : null].filter(Boolean).join(' · ');
+  if (sub) { const s = document.createElement('div'); s.className = 'cs'; s.textContent = sub; item.appendChild(s); }
+  const m = document.createElement('div'); m.className = 'cm';
+  const bk = diffBucket(r), dt = diffText(r);
+  const tri = document.createElement('span'); tri.className = 'tri d-' + (bk === 'unrated' ? 'none' : bk); m.appendChild(tri);
+  const bits = [dt || 'Not rated', r.distance_km != null ? (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km' : null, r.time_text && !/^about/.test(r.time_text) ? r.time_text : null,
+                r.ascent_m ? '↑ ' + Math.round(r.ascent_m) + ' m' : null, r.route_type].filter(Boolean);
+  m.append(bits.join(' · '));
+  if (r.done) { const c = document.createElement('span'); c.className = 'badge'; c.textContent = '✓ Completed'; m.appendChild(c); }
+  item.appendChild(m);
+  if (mode === 'box') {                                 // the box keeps its tools on the card
+    const acts = document.createElement('div'); acts.className = 'acts2';
+    const gb = document.createElement('button'); gb.className = 'b alt'; gb.textContent = 'Photos & my notes';
+    const panel = document.createElement('div'); panel.style.display = 'none'; panel.style.width = '100%';
+    gb.onclick = e => { e.stopPropagation(); togglePanel(r, gb, panel); };
+    acts.appendChild(gb);
+    if (r.line && r.line[0] && r.line[0].length > 1) acts.appendChild(makeNav(r));
+    const a = document.createElement('a'); a.className = 'dl b'; a.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); a.textContent = 'Download GPX'; a.onclick = e => e.stopPropagation();
+    acts.appendChild(a);
+    const rm = document.createElement('button'); rm.className = 'del'; rm.textContent = 'Remove'; rm.onclick = e => { e.stopPropagation(); del(r.osm_id); };
+    acts.appendChild(rm); item.append(acts, panel);
+  }
+  item.onclick = () => openWalk(r.osm_id);
+  item.onmouseenter = () => pinHot(r.osm_id, true); item.onmouseleave = () => pinHot(r.osm_id, false);
+  if (photoObs) photoObs.observe(item);
+  return item;
+}
+
+let pinEls = {};
+function pinHot(id, on) { const el = pinEls[id]; if (el) el.classList.toggle('sel', on || (sel && sel.r.osm_id == id)); }
+function drawPins() {
+  pinLayer.clearLayers(); pinEls = {};
+  if (mode === 'data') return;
+  const z = map.getZoom(), cell = 72, groups = new Map();
+  shown().forEach(r => {
+    if (r.lat == null || r.lon == null) return;
+    if (mode === 'box' && r.line) return;                         // saved walks are drawn as lines
+    if (sel && sel.r.osm_id === r.osm_id) return;                 // the open walk is drawn on the map itself
+    const p = map.project([r.lat, r.lon], z), k = Math.floor(p.x / cell) + ':' + Math.floor(p.y / cell);
+    (groups.get(k) || groups.set(k, []).get(k)).push(r);
+  });
+  groups.forEach(list => {
+    if (list.length === 1) {
+      const r = list[0], isSel = sel && sel.r.osm_id === r.osm_id, label = z >= 13 && r.distance_km != null;
+      const html = '<div class="pinl"><i class="pin1' + (isSel ? ' sel' : '') + '"></i>' + (label ? '<span>' + (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km</span>' : '') + '</div>';
+      const mk = L.marker([r.lat, r.lon], {icon: L.divIcon({className: '', html, iconSize: [label ? 74 : 16, 16], iconAnchor: [8, 8]}), riseOnHover: true});
+      mk.on('click', () => openWalk(r.osm_id));
+      mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); });
+      mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); });
+      mk.addTo(pinLayer);
+      setTimeout(() => { const e = mk.getElement && mk.getElement(); if (e) pinEls[r.osm_id] = e.querySelector('.pin1'); }, 0);
+    } else {
+      const lat = list.reduce((a, r) => a + r.lat, 0) / list.length, lon = list.reduce((a, r) => a + r.lon, 0) / list.length;
+      const mk = L.marker([lat, lon], {icon: L.divIcon({className: '', html: '<div class="clus">' + list.length + ' trails</div>', iconSize: [70, 24], iconAnchor: [35, 12]})});
+      mk.on('click', () => map.fitBounds(L.latLngBounds(list.map(r => [r.lat, r.lon])), {padding: [70, 70], maxZoom: Math.min(18, z + 4)}));
+      mk.addTo(pinLayer);
+    }
+  });
+}
+map.on('zoomend', drawPins);
+
 function render(keep) {
   if (!keep) clearSelection();
   const list = $('list'); list.textContent = '';
   layerGroup.clearLayers(); lines = {};
-  const all = [];
-  results.forEach(r => {
-    const item = document.createElement('div'); item.className = 'item'; item.id = 'w' + r.osm_id;
-    if (mode === 'find' && !r.added) {
-      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = selected.has(r.osm_id);
-      cb.onclick = e => { e.stopPropagation(); cb.checked ? selected.add(r.osm_id) : selected.delete(r.osm_id); };
-      item.appendChild(cb);
-    }
-    const body = document.createElement('div'); body.style.flex = '1';
-    const t = document.createElement('div'); t.className = 't'; t.textContent = r.name;
-    if (r.added && mode === 'find') { const bd = document.createElement('span'); bd.className = 'badge'; bd.textContent = 'in box'; t.appendChild(bd); }
-    const m = document.createElement('div'); m.className = 'm';
-    m.textContent = [r.distance_km != null ? (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km' : null, r.route_type, r.time_text, r.ascent_m ? ('↑ ' + Math.round(r.ascent_m) + ' m') : null, r.region || r.place].filter(Boolean).join(' · ');
-    body.append(t, m);
-    const chips = document.createElement('div'); chips.className = 'chiprow';
-    const chip = (txt, cls) => { const c = document.createElement('span'); c.className = 'chip' + (cls ? ' ' + cls : ''); c.textContent = txt; chips.appendChild(c); };
-    if (r.difficulty) chip(r.difficulty);
-    chip(r.source_label);
-    if (r.done) chip('✓ Completed');
-    if (r.ref) chip('ref ' + r.ref);
-    if (r.autoSwapped) chip('⇄ starts at ' + r.autoSwapped);
-    if (r.est) { chip('Est. ' + r.est.label + ' ' + r.est.score.toFixed(1) + '/10', 'estchip ' + diffClass(r.est.label)); chips.lastChild.title = r.est.reasons.join(' · '); }
-    body.appendChild(chips);
-    if (r.my_rating) chip('My rating: ' + '★'.repeat(r.my_rating));
-    if (mode === 'box') {
-      const gb = document.createElement('button'); gb.className = 'b alt'; gb.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px';
-      gb.textContent = 'Photos & my notes';
-      const panel = document.createElement('div'); panel.style.display = 'none';
-      gb.onclick = e => { e.stopPropagation(); togglePanel(r, gb, panel); };
-      body.append(gb, panel);
-    }
-    { const at = document.createElement('a'); at.href = 'https://www.alltrails.com/search?q=' + encodeURIComponent(r.name + (r.region ? ' ' + r.region : '')); at.target = '_blank'; at.rel = 'noopener'; at.textContent = 'Find on AllTrails ↗'; at.style.cssText = 'font-size:13px;margin-left:10px'; at.onclick = e => e.stopPropagation(); body.appendChild(at); }
-    if (r.line && r.line.length && r.line[0].length > 1) body.appendChild(makeNav(r));
-    if (!r.line) { const hint = document.createElement('div'); hint.className = 'm'; hint.style.fontStyle = 'italic'; hint.textContent = 'Click to load the route, elevation, weather and nearby places.'; body.appendChild(hint); }
-    if (r.link) { const a = document.createElement('a'); a.href = r.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'More info'; a.style.fontSize = '13px'; a.onclick = e => e.stopPropagation(); body.appendChild(a); }
-    if (r.description) { const d = document.createElement('div'); d.className = 'd'; d.textContent = r.description.slice(0, 160); body.appendChild(d); }
-    item.appendChild(body);
-    if (r.added) {
-      const acts = document.createElement('div'); acts.className = 'acts';
-      const a = document.createElement('a'); a.className = 'dl'; a.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); a.textContent = 'Download GPX';
-      a.onclick = e => e.stopPropagation(); acts.appendChild(a);
-      if (mode === 'box') { const b = document.createElement('button'); b.className = 'del'; b.textContent = 'Remove'; b.onclick = e => { e.stopPropagation(); del(r.osm_id); }; acts.appendChild(b); }
-      item.appendChild(acts);
-    }
-    item.onclick = () => openWalk(r.osm_id);
-    list.appendChild(item);
+  const all = [], vis = shown();
+  $('countTxt').textContent = mode === 'box' ? (results.length + ' walk' + (results.length === 1 ? '' : 's') + ' in your box')
+    : (results.length ? vis.length + (vis.length !== results.length ? ' of ' + results.length : '') + ' walk' + (results.length === 1 ? '' : 's') : '');
+  if (results.length && !vis.length) { const e = document.createElement('div'); e.className = 'dp-note'; e.textContent = 'No walk matches the filters. Use “All” on the map to clear them.'; list.appendChild(e); }
+  vis.forEach(r => {
+    list.appendChild(makeCard(r));
     if (r.line && r.line.length) {
-      const pl = L.polyline(r.line, {color: r.added ? '#2f6f4f' : '#d2691e', weight: 4, opacity: .8})
+      const pl = L.polyline(r.line, {color: r.added ? '#3b6b2a' : '#d2691e', weight: 4, opacity: .8})
         .bindTooltip(r.name).on('click', () => openWalk(r.osm_id)).addTo(layerGroup);
       lines[r.osm_id] = pl; all.push(pl);
     }
   });
-  if (mode === 'box' && all.length) map.fitBounds(L.featureGroup(all).getBounds(), {padding:[30,30], maxZoom: 14});
+  drawPins();
+  if (mode === 'box' && all.length) map.fitBounds(L.featureGroup(all).getBounds(), fitOpts(14));
   if (keep && sel) { const el = $('w' + sel.r.osm_id); if (el) el.classList.add('sel'); if (lines[sel.r.osm_id]) lines[sel.r.osm_id].setStyle({opacity: 0}); }
 }
+
 function reverseWalk(id) {              // walk the same route the other way round
   const r = results.find(x => x.osm_id == id); if (!r || !r.line) return;
   r.line = r.line.map(c => c.slice().reverse()); r.reversed = !r.reversed; r.autoSwapped = null;
@@ -1405,10 +1857,10 @@ async function openWalk(id) {          // routes are fetched only when a walk is
   focus(id);
 }
 function focus(id) {
-  document.querySelectorAll('.item').forEach(e => e.classList.remove('sel'));
+  document.querySelectorAll('.item').forEach(e => e.classList.remove('sel', 'hot'));
   const el = $('w' + id); if (el) { el.classList.add('sel'); el.scrollIntoView({block:'nearest'}); }
   Object.entries(lines).forEach(([k, l]) => l.setStyle({weight: k == id ? 7 : 4}));
-  if (lines[id]) { lines[id].bringToFront(); map.fitBounds(lines[id].getBounds(), {padding:[30,30]}); }
+  if (lines[id]) { lines[id].bringToFront(); map.fitBounds(lines[id].getBounds(), fitOpts()); }
   const r = results.find(x => x.osm_id == id); if (r) selectWalk(r);
 }
 
