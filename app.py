@@ -84,6 +84,20 @@ WALK_GRADE = {1: "Path", 2: "Short walk", 3: "Walking track", 4: "Tramping track
               5: "Challenging tramping track", 6: "Route"}
 DOG_TEXT = {"OffLeash": "off lead", "OnLeash": "on lead only", "Permit": "permit required",
             "ProhibitedAtTimes": "prohibited at times", "Prohibited": "not allowed"}
+OSM_DOG = {"yes": "allowed", "leashed": "on lead only", "unleashed": "off lead", "no": "not allowed", "designated": "allowed"}
+OSM_WHEELCHAIR = {"yes": "yes", "designated": "yes", "limited": "limited", "no": "no"}
+
+
+def tag_facts(tags):
+    """Dog and wheelchair information from OpenStreetMap tags (only what the map actually says)."""
+    out = {}
+    dog = OSM_DOG.get(str((tags or {}).get("dog", "")).lower())
+    if dog:
+        out["dogs"] = dog
+    wc = OSM_WHEELCHAIR.get(str((tags or {}).get("wheelchair", "")).lower())
+    if wc:
+        out["wheelchair"] = wc
+    return out
 
 ATTRIBUTION = {
     "osm-route": "(c) OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)",
@@ -149,6 +163,8 @@ EXTRA_COLUMNS = {
     "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
     "link": "TEXT", "region": "TEXT", "time_text": "TEXT",
     "my_rating": "INTEGER", "my_note": "TEXT", "profile": "TEXT", "terrain": "TEXT",
+    "dogs": "TEXT", "wheelchair": "TEXT", "status": "TEXT", "alerts_url": "TEXT", "conditions": "TEXT",
+    "done": "INTEGER", "done_at": "TEXT",
 }
 
 
@@ -301,6 +317,7 @@ def make_walk(osm_id, source, name, chains, tags=None, **extra):
         "difficulty": difficulty_from_tags(tags), "ascent_m": None,
         "link": None, "region": None, "time_text": None,
     }
+    w.update(tag_facts(tags))
     w.update({k: v for k, v in extra.items() if v is not None})
     return w
 
@@ -365,7 +382,7 @@ def parse_doc(data):
         wk = make_walk(
             DOC_BASE + int(oid), "doc", name, chains, {"operator": "Department of Conservation"},
             description=p.get("introduction"), difficulty=p.get("difficulty"),
-            time_text=p.get("completiontime"), region=p.get("region"), link=link,
+            time_text=p.get("completiontime"), region=p.get("region"), link=link, alerts_url=link,
         )
         if wk:
             walks.append(wk)
@@ -403,30 +420,13 @@ def parse_nz_tracks(data):
         dist = sum(chain_length_m(c) for c in chains) / 1000.0
         if dist < MIN_TRACK_KM:
             continue
-        props = grp["props"]
-
-        def first(key):
-            for pr in props:
-                v = pr.get(key)
-                if v not in (None, "", "Unknown"):
-                    return v
-            return None
-
-        grades = [pr.get("walk") for pr in props if pr.get("walk") in WALK_GRADE]
-        difficulty = WALK_GRADE[max(grades)] if grades else None
-        facts = []
-        dog = first("dogaccess")
-        if dog in DOG_TEXT:
-            facts.append("Dogs: %s." % DOG_TEXT[dog])
-        if first("mobilityaccess") == "Yes":
-            facts.append("Suitable for mobility access.")
-        desc = " ".join(x for x in [first("description"), " ".join(facts)] if x) or None
+        sm = _nz_summary(grp["props"])
         lat0, lon0 = chains[0][0]
         wid = NZT_BASE + zlib.crc32(("%s|%.2f|%.2f" % (grp["name"], lat0, lon0)).encode("utf-8"))
         wk = make_walk(
-            wid, "nz-track", grp["name"], chains, {"operator": first("managedby")},
-            description=desc, difficulty=difficulty, link=first("weblink"),
-            region=first("locality") or first("localauthority"),
+            wid, "nz-track", grp["name"], chains, {"operator": sm["operator"]},
+            description=sm["description"], difficulty=sm["difficulty"], link=sm["link"], region=sm["region"],
+            dogs=sm["dogs"], wheelchair=sm["wheelchair"], status=sm["status"], conditions=sm["conditions"],
         )
         if wk:
             walks.append(wk)
@@ -618,6 +618,7 @@ def make_light(osm_id, source, name, recipe, tags=None, distance_km=None, approx
         "tags": tags, "chains": None, "route_type": None, "difficulty": difficulty_from_tags(tags),
         "ascent_m": None, "link": None, "region": None, "time_text": None, "recipe": recipe,
     }
+    w.update(tag_facts(tags))
     w.update({k: v for k, v in extra.items() if v is not None})
     return w
 
@@ -718,7 +719,8 @@ def doc_lights(features):
             DOC_BASE + oid, "doc", p.get("name") or "DOC track", {"kind": "doc", "oid": oid},
             {"operator": "Department of Conservation"}, _km(p), False, None,
             description=p.get("introduction"), difficulty=p.get("difficulty"), time_text=p.get("completiontime"),
-            region=p.get("region"), link=p.get("walkingandtrampingwebpage") or p.get("staticlink")))
+            region=p.get("region"), link=p.get("walkingandtrampingwebpage") or p.get("staticlink"),
+            alerts_url=p.get("walkingandtrampingwebpage") or p.get("staticlink")))
     return walks
 
 
@@ -733,16 +735,15 @@ def _nz_summary(props):
                 return v
         return None
     grades = [pr.get("walk") for pr in props if pr.get("walk") in WALK_GRADE]
-    facts = []
-    dog = first("dogaccess")
-    if dog in DOG_TEXT:
-        facts.append("Dogs: %s." % DOG_TEXT[dog])
-    if first("mobilityaccess") == "Yes":
-        facts.append("Suitable for mobility access.")
+    mob = first("mobilityaccess")
+    stats = {str(pr.get("status") or "").strip() for pr in props}
     return {"difficulty": WALK_GRADE[max(grades)] if grades else None,
-            "description": " ".join(x for x in [first("description"), " ".join(facts)] if x) or None,
+            "description": first("description"),
             "link": first("weblink"), "region": first("locality") or first("localauthority"),
-            "operator": first("managedby"), "authority": first("localauthority")}
+            "operator": first("managedby"), "authority": first("localauthority"),
+            "dogs": DOG_TEXT.get(first("dogaccess")), "wheelchair": {"Yes": "yes", "No": "no"}.get(mob),
+            "status": "Temporarily closed" if "TempClosed" in stats else None,
+            "conditions": first("conditionsofuse")}
 
 
 def nz_light_id(name, authority):
@@ -754,7 +755,7 @@ def list_nz(s, w, n, e):
         "where": NZ_WHERE, "geometry": "%f,%f,%f,%f" % (w, s, e, n), "geometryType": "esriGeometryEnvelope",
         "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnGeometry": "false",
         "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,"
-                     "DogAccess,MobilityAccess,ManagedBy,Shape__Length",
+                     "DogAccess,MobilityAccess,ManagedBy,Status,ConditionsOfUse,Shape__Length",
         "resultRecordCount": 2000, "f": "json",
     }
     return nz_lights(_arcgis_get(NZT_URL, params, "NZ tracks").get("features", []), [s, w, n, e])
@@ -784,7 +785,8 @@ def nz_lights(features, bbox):
             nz_light_id(g["name"], sm["authority"]), "nz-track", g["name"],
             {"kind": "nz", "name": g["name"], "bbox": bbox, "authority": sm["authority"]}, {"operator": sm["operator"]},
             dist, False, None, description=sm["description"], difficulty=sm["difficulty"],
-            link=sm["link"], region=sm["region"]))
+            link=sm["link"], region=sm["region"], dogs=sm["dogs"], wheelchair=sm["wheelchair"],
+            status=sm["status"], conditions=sm["conditions"]))
     return walks
 
 
@@ -877,7 +879,7 @@ def load_detail(wk):
         raise RuntimeError("Could not load the route for \"%s\". The source may have changed; search again." % wk["name"])
     full["osm_id"] = wk["osm_id"]           # keep the id the list used
     full["recipe"] = rec
-    for k in ("description", "link", "region", "difficulty", "time_text"):
+    for k in ("description", "link", "region", "difficulty", "time_text", "dogs", "wheelchair", "status", "alerts_url", "conditions"):
         if not full.get(k) and wk.get(k):
             full[k] = wk[k]
     with _cache_lock:
@@ -1022,6 +1024,11 @@ def public(walk, added=False, preview=True):
         "difficulty": walk.get("difficulty"), "route_type": walk.get("route_type"),
         "ascent_m": ascent, "link": walk.get("link"), "region": walk.get("region"),
         "time_text": walk.get("time_text") or (("about " + fmt_minutes(mins)) if mins else None),
+        "time_range": walk.get("time_text") or (
+            ("%s – %s (est.)" % (fmt_minutes(int(round(mins * 0.75))), fmt_minutes(int(round(mins * 1.4))))) if mins else None),
+        "dogs": walk.get("dogs"), "wheelchair": walk.get("wheelchair"), "status": walk.get("status"),
+        "alerts_url": walk.get("alerts_url"), "conditions": walk.get("conditions"), "done": bool(walk.get("done")),
+        "done_at": walk.get("done_at"),
         "place": walk.get("place"), "added_at": walk.get("added_at"),
         "my_rating": walk.get("my_rating"), "my_note": walk.get("my_note"),
     }
@@ -1128,12 +1135,14 @@ def api_add():
             wk["ascent_m"] = elevation_gain(wk["chains"][0])
         cur = conn.execute(
             "INSERT OR IGNORE INTO walks (osm_id,name,ref,network,operator,description,distance_km,"
-            "lat,lon,place,tags,geom,added_at,source,difficulty,route_type,ascent_m,link,region,time_text)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "lat,lon,place,tags,geom,added_at,source,difficulty,route_type,ascent_m,link,region,time_text,"
+            "dogs,wheelchair,status,alerts_url,conditions)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (wk["osm_id"], wk["name"], wk["ref"], wk["network"], wk["operator"], wk["description"],
              wk["distance_km"], wk["lat"], wk["lon"], body.get("place"),
              json.dumps(wk["tags"]), json.dumps(wk["chains"]), now, wk["source"], wk["difficulty"],
-             wk["route_type"], wk["ascent_m"], wk["link"], wk["region"], wk["time_text"]),
+             wk["route_type"], wk["ascent_m"], wk["link"], wk["region"], wk["time_text"],
+             wk.get("dogs"), wk.get("wheelchair"), wk.get("status"), wk.get("alerts_url"), wk.get("conditions")),
         )
         added += cur.rowcount
     conn.commit()
@@ -1695,6 +1704,18 @@ def api_profile(osm_id):
         return jsonify(profile_for(osm_id, chain, in_box))
     except RuntimeError as ex:
         return jsonify(error="Elevation profile unavailable: %s" % ex), 502
+
+
+@app.put("/api/walks/<int:osm_id>/done")
+def api_done(osm_id):
+    done = bool((request.get_json(silent=True) or {}).get("done", True))
+    conn = db()
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds") if done else None
+    cur = conn.execute("UPDATE walks SET done=?, done_at=? WHERE osm_id=?", (1 if done else 0, stamp, osm_id))
+    conn.commit()
+    if not cur.rowcount:
+        return jsonify(error="Add the walk to your box first"), 404
+    return jsonify(ok=True, done=done, done_at=stamp)
 
 
 @app.put("/api/walks/<int:osm_id>/note")
@@ -2280,7 +2301,9 @@ def store_put(conn, light, bbox, detail=None):
 def light_of(wk, recipe):
     return make_light(wk["osm_id"], wk["source"], wk["name"], recipe, wk.get("tags") or {}, wk.get("distance_km"),
                       False, (wk["lat"], wk["lon"]), description=wk.get("description"), difficulty=wk.get("difficulty"),
-                      time_text=wk.get("time_text"), region=wk.get("region"), link=wk.get("link"))
+                      time_text=wk.get("time_text"), region=wk.get("region"), link=wk.get("link"),
+                      dogs=wk.get("dogs"), wheelchair=wk.get("wheelchair"), status=wk.get("status"),
+                      alerts_url=wk.get("alerts_url"), conditions=wk.get("conditions"))
 
 
 def seed_doc(conn):
@@ -2773,7 +2796,7 @@ def find_by_name(tokens, sources):
             data = _arcgis_get(NZT_URL, {
                 "where": "%s AND (%s)" % (NZ_WHERE, _like_where(tokens, ["Name", "MainTrail"])), "returnGeometry": "false", "f": "json",
                 "resultRecordCount": 2000,
-                "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,DogAccess,MobilityAccess,ManagedBy,Shape__Length"}, "NZ tracks")
+                "outFields": "OBJECTID,Name,MainTrail,Walk,Locality,LocalAuthority,Description,WebLink,DogAccess,MobilityAccess,ManagedBy,Status,ConditionsOfUse,Shape__Length"}, "NZ tracks")
             nz_s, nz_n, nz_w, nz_e = NZ_BOX
             walks += nz_lights(data.get("features", []), [nz_s, nz_w, nz_n, nz_e])
         except RuntimeError as ex:

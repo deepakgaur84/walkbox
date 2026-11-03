@@ -236,7 +236,9 @@ assert "Tiny Alley" not in by_name and "Footpath" not in by_name and "Bit of Pat
 walkway = by_name["Takapuna Beach Walkway"]
 assert walkway["source"] == "nz-track" and not walkway["approx"] and 1.3 < walkway["distance_km"] < 1.4, walkway
 assert walkway["difficulty"] == "Walking track" and walkway["region"] == "Takapuna"
-assert "Dogs: on lead only." in walkway["description"] and walkway["link"] == "https://example.org/walkway"
+assert walkway["description"] == "Coastal boardwalk and sand." and walkway["link"] == "https://example.org/walkway"
+assert walkway["dogs"] == "on lead only" and walkway["wheelchair"] == "yes" and walkway["status"] is None     # structured facts, not glued onto the text
+assert walkway["time_range"].endswith("(est.)") and " – " in walkway["time_range"], walkway["time_range"]       # a range, like a planning app
 assert sum(1 for x in res if x["name"] == "Takapuna Beach Walkway") == 1       # OSM duplicate dropped
 kauri = by_name["Test Kauri Track"]
 assert kauri["source"] == "doc" and kauri["distance_km"] == 3.2 and kauri["difficulty"] == "Easy"
@@ -1105,4 +1107,32 @@ d = c.post("/api/detail", json={"id": r["results"][0]["osm_id"]}).get_json()
 assert d["line"] and d["name"] == "Maungauika North Head Historic Walk", d                                       # opens from the download, no internet
 wb.requests.get = fake_get
 assert b"runNameSearch" in c.get("/").data and b"Search all NZ" in c.get("/").data
+
+# ==========================================================================
+# "At a glance" facts
+# ==========================================================================
+conn.execute("DELETE FROM seed_state"); conn.execute("DELETE FROM store"); conn.commit(); wb._cache.clear(); wb.SEARCH_TTL = 0; kvclear()
+assert wb.tag_facts({"dog": "leashed", "wheelchair": "designated"}) == {"dogs": "on lead only", "wheelchair": "yes"}
+assert wb.tag_facts({"dog": "no", "wheelchair": "limited"}) == {"dogs": "not allowed", "wheelchair": "limited"}
+assert wb.tag_facts({"dog": "maybe", "surface": "sand"}) == {}                                                   # only what the map says
+sm = wb._nz_summary([{"dogaccess": "Prohibited", "mobilityaccess": "No", "status": "TempClosed", "conditionsofuse": "Closed in lambing", "walk": 3, "name": "x"},
+                     {"dogaccess": "Unknown", "mobilityaccess": "Unknown", "status": "Open", "walk": 2}])
+assert (sm["dogs"], sm["wheelchair"], sm["status"], sm["conditions"], sm["difficulty"]) == ("not allowed", "no", "Temporarily closed", "Closed in lambing", "Walking track"), sm
+sm = wb._nz_summary([{"dogaccess": "Unknown", "mobilityaccess": "Unknown", "status": "Open"}])
+assert sm["dogs"] is None and sm["wheelchair"] is None and sm["status"] is None                                  # unknown stays unknown
+d = c.post("/api/search", json={"south": -36.1, "west": 173.95, "north": -35.95, "east": 174.05, "sources": ["doc"]}).get_json()["results"][0]
+assert d["alerts_url"] == "https://www.doc.govt.nz/x" and d["time_range"] == "1 hr 30 min one way", d             # DOC's own page shows the live alerts
+pub = wb.public({"osm_id": 5, "name": "N", "distance_km": 6.0, "ascent_m": 100, "chains": None})
+assert pub["time_range"] == "1 h 02 min – 1 h 55 min (est.)" and pub["done"] is False and pub["dogs"] is None, pub
+# complete / not complete, and the facts survive being saved to the box
+wk = wb._cache[wb.NZT_BASE + 0] if False else None
+c.delete("/api/walks/%d" % (wb.DOC_BASE + 7))
+add = c.post("/api/walks", json={"ids": [wb.DOC_BASE + 7]}).get_json()
+assert add["added"] == 1
+assert c.put("/api/walks/%d/done" % (wb.DOC_BASE + 7), json={"done": True}).get_json()["done"] is True
+row = c.post("/api/detail", json={"id": wb.DOC_BASE + 7}).get_json()
+assert row["done"] is True and row["done_at"] and row["alerts_url"] == "https://www.doc.govt.nz/x", row
+assert c.put("/api/walks/%d/done" % (wb.DOC_BASE + 7), json={"done": False}).get_json()["done_at"] is None
+assert c.put("/api/walks/987654/done", json={"done": True}).status_code == 404                                   # only walks in the box
+assert b"At a glance" in c.get("/").data and b"View current alerts" in c.get("/").data
 print("SEED TESTS PASSED")

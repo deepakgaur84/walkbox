@@ -161,6 +161,16 @@ The NAS only pulls that image, so no code folder and no `git` on the NAS are nee
 
 To update after code changes: push to `main`, wait for the green tick on the Actions tab, then redeploy the stack in Dockhand with "pull latest image".
 
+## At a glance
+
+Opening a walk shows a panel of the facts you check before leaving: distance, time (DOC's own time, or a range estimated from distance and
+climb), difficulty, wheelchair access, dog rules, and a red banner if the track is temporarily closed. Council tracks show their
+conditions of use (for example seasonal closures). DOC walks get a red **View current alerts** button that opens the DOC page for that walk,
+where its live alerts are published. Dog and wheelchair details come from the source data (DOC and the national tracks dataset, or the
+`dog` and `wheelchair` tags on OpenStreetMap); when the source says nothing, the panel says "unknown" instead of guessing. The panel also
+has **Add to my box**, **Share track** (the share sheet on a phone, or copy to the clipboard) and **Mark as complete** (walks you have
+done show a "✓ Completed" tag in your box).
+
 ## Search by name or by map
 
 Type in the box at the top of **Find**. With text in it the big button becomes **Search all NZ for “…”**: it lists every walk whose name

@@ -36,6 +36,17 @@
   #info .chips2 button:disabled { opacity:.4; cursor:default; }
   #info .pl { padding:4px 0; border-top:1px solid var(--line); cursor:pointer; }
   #info .sec { font-weight:600; margin-top:8px; }
+  #info .facts { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px 4px; margin:4px 0 8px; }
+  #info .fact { display:flex; flex-direction:column; align-items:center; text-align:center; font-size:11px; font-weight:600; line-height:1.25; gap:4px; color:#263238; }
+  #info .fact i { width:36px; height:36px; border-radius:50%; background:#37474f; color:#fff; display:flex; align-items:center; justify-content:center; font-style:normal; font-size:18px; position:relative; box-sizing:border-box; }
+  #info .fact.act { cursor:pointer; } #info .fact.act i { background:#4a6b2a; }
+  #info .fact.ok i { background:#2e7d32; }
+  #info .fact.no i { background:#fff; border:3px solid #c62828; color:#c62828; }
+  #info .fact.no i::after { content:''; position:absolute; width:3px; height:30px; background:#c62828; transform:rotate(45deg); border-radius:2px; }
+  #info .fact.unk i { background:#b0bec5; }
+  #info .fact.warn i { background:#c62828; }
+  #info .alertbtn { display:block; text-align:center; background:#c9301c; color:#fff !important; font-weight:700; border-radius:22px; padding:9px 12px; text-decoration:none; margin:4px 0 8px; }
+  #info .cond { font-size:12px; color:var(--mute); margin:0 0 8px; }
   .poi { width:24px; height:24px; border-radius:50%; background:#fff; border:2px solid #555; text-align:center; line-height:19px; font-size:13px; box-sizing:border-box; }
   @media (max-width:800px) { #info { width:calc(100% - 24px); max-height:38%; } }
   #revbtn { position:absolute; top:10px; right:12px; z-index:900; display:none; background:#fff; border:0; border-radius:20px; padding:7px 14px; font-size:13px; font-weight:600; color:var(--brand); box-shadow:0 1px 6px rgba(0,0,0,.3); cursor:pointer; }
@@ -983,6 +994,7 @@ function showLegend(s) {
 function showDifficulty(s) {
   const box = $('diffbox'); if (!box) return;
   const d = s.terrain && s.terrain.difficulty; box.textContent = '';
+  const ft = document.querySelector('#fact-diff span'); if (ft && d && !s.r.difficulty) ft.textContent = d.label + ' (est.)';
   if (!d) { box.textContent = 'Difficulty unavailable'; return; }
   const top = document.createElement('div');
   const badge = document.createElement('span'); badge.className = 'dbadge ' + diffClass(d.label); badge.textContent = d.label;
@@ -1064,10 +1076,56 @@ function renderPlaces(box, s, data) {
   const at = document.createElement('div'); at.className = 'sub'; at.style.marginTop = '4px';
   at.textContent = 'Places within a short distance of the route, from OpenStreetMap. They may be closed or out of date. Tap one for details.'; box.appendChild(at);
 }
+// ---- "At a glance": the facts a planning app shows first, plus save / share / complete
+const DOG_LABEL = {'off lead': ['ok', 'Dogs off lead'], 'on lead only': ['ok', 'Dogs on lead only'], 'allowed': ['ok', 'Dogs allowed'],
+                   'permit required': ['unk', 'Dogs: permit needed'], 'prohibited at times': ['unk', 'Dogs banned at times'], 'not allowed': ['no', 'No dogs allowed']};
+const WC_LABEL = {yes: ['ok', 'Wheelchair friendly'], limited: ['unk', 'Partly wheelchair friendly'], no: ['no', 'Not wheelchair friendly']};
+async function addOne(r) {
+  if (r.added) return;
+  await post('/api/walks', {ids: [r.osm_id], place: window._place || null, reverse: r.reversed ? [r.osm_id] : []});
+  r.added = true;
+  const row = $('w' + r.osm_id), tt = row && row.querySelector('.t');
+  if (tt && !tt.querySelector('.badge')) { const bd = document.createElement('span'); bd.className = 'badge'; bd.textContent = 'in box'; tt.appendChild(bd); }
+}
+async function shareWalk(s) {
+  const r = s.r, st = s.chain[0];
+  const text = r.name + (r.distance_km != null ? ' · ' + r.distance_km.toFixed(1) + ' km' : '') + (r.difficulty ? ' · ' + r.difficulty : '') +
+    '\nStart: https://www.google.com/maps/search/?api=1&query=' + st[0].toFixed(5) + ',' + st[1].toFixed(5) + (r.link ? '\nMore info: ' + r.link : '');
+  if (navigator.share) { try { await navigator.share({title: r.name, text}); return ''; } catch (e) { if (e.name === 'AbortError') return ''; } }
+  try { await navigator.clipboard.writeText(text); return 'Copied'; } catch (e) { window.prompt('Copy this to share:', text); return ''; }
+}
+function buildFacts(s) {
+  const r = s.r, wrap = document.createElement('div');
+  const grid = document.createElement('div'); grid.className = 'facts'; wrap.appendChild(grid);
+  const tile = (icon, text, cls, onclick, id) => {
+    const d = document.createElement('div'); d.className = 'fact ' + cls; if (id) d.id = id;
+    const i = document.createElement('i'); i.textContent = icon; const sp = document.createElement('span'); sp.textContent = text;
+    d.append(i, sp); if (onclick) { d.onclick = onclick; d.title = text; } grid.appendChild(d); return d;
+  };
+  const redo = () => { const fresh = buildFacts(s); wrap.replaceWith(fresh); s.factsEl = fresh; };
+  const safely = fn => async () => { try { await fn(); } catch (e) { status(e.message, true); } redo(); };
+  tile(r.added ? '♥' : '♡', r.added ? 'In my box' : 'Add to my box', 'act', safely(() => addOne(r)));
+  const sh = tile('⤴', 'Share track', 'act', async () => { const m = await shareWalk(s); if (m) sh.querySelector('span').textContent = m; });
+  tile(r.done ? '☑' : '☐', r.done ? 'Completed' : 'Mark as complete', 'act', safely(async () => {
+    await addOne(r);
+    const j = await fetch('/api/walks/' + r.osm_id + '/done', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({done: !r.done})}).then(x => x.json());
+    if (j.error) throw new Error(j.error); r.done = j.done; r.done_at = j.done_at;
+  }));
+  if (r.distance_km != null) tile('↗', (r.approx ? '~' : '') + r.distance_km.toFixed(2) + ' km', '');
+  if (r.time_range) tile('⏱', r.time_range, '');
+  tile('🥾', r.difficulty || (s.terrain && s.terrain.difficulty ? s.terrain.difficulty.label + ' (est.)' : 'Difficulty: working it out'), '', null, 'fact-diff');
+  const wc = WC_LABEL[r.wheelchair]; tile('♿', wc ? wc[1] : 'Wheelchair access unknown', wc ? wc[0] : 'unk');
+  const dg = DOG_LABEL[r.dogs]; tile('🐕', dg ? dg[1] : 'Dog rules unknown', dg ? dg[0] : 'unk');
+  if (r.status) tile('⚠', r.status, 'warn');
+  if (r.alerts_url) { const a = document.createElement('a'); a.className = 'alertbtn'; a.href = r.alerts_url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '⚠ View current alerts'; wrap.appendChild(a); }
+  if (r.conditions) { const c = document.createElement('div'); c.className = 'cond'; c.textContent = r.conditions.slice(0, 220); wrap.appendChild(c); }
+  return wrap;
+}
+
 function loadInfo(s) {
   const el = $('info'); el.style.display = 'block'; el.textContent = '';
   const head = document.createElement('div'); head.className = 'ih';
-  const ttl = document.createElement('span'); ttl.textContent = 'Weather & nearby'; const arrow = document.createElement('span');
+  const ttl = document.createElement('span'); ttl.textContent = 'At a glance · weather · nearby'; const arrow = document.createElement('span');
   head.append(ttl, arrow);
   const body = document.createElement('div'); body.className = 'ib';
   const setOpen = o => { infoOpen = o; body.style.display = o ? '' : 'none'; arrow.textContent = o ? '▾' : '▸'; };
@@ -1077,7 +1135,8 @@ function loadInfo(s) {
   const wbox = document.createElement('div'); wbox.textContent = 'Loading weather…'; wbox.className = 'sub';
   const sec = document.createElement('div'); sec.className = 'sec'; sec.textContent = 'Along the route';
   const pbox = document.createElement('div'); pbox.textContent = 'Looking for cafés, water, toilets and rest spots…'; pbox.className = 'sub';
-  body.append(dbox, wbox, sec, pbox);
+  s.factsEl = buildFacts(s);
+  body.append(s.factsEl, dbox, wbox, sec, pbox);
   if (s.terrain) showDifficulty(s);
   const mid = pointAt(s.chain, s.cum, s.cum[s.cum.length - 1] / 2);
   cachedGet('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4))
@@ -1274,6 +1333,7 @@ function render(keep) {
     const chip = (txt, cls) => { const c = document.createElement('span'); c.className = 'chip' + (cls ? ' ' + cls : ''); c.textContent = txt; chips.appendChild(c); };
     if (r.difficulty) chip(r.difficulty);
     chip(r.source_label);
+    if (r.done) chip('✓ Completed');
     if (r.ref) chip('ref ' + r.ref);
     if (r.autoSwapped) chip('⇄ starts at ' + r.autoSwapped);
     if (r.est) { chip('Est. ' + r.est.label + ' ' + r.est.score.toFixed(1) + '/10', 'estchip ' + diffClass(r.est.label)); chips.lastChild.title = r.est.reasons.join(' · '); }
