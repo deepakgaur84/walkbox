@@ -161,6 +161,25 @@ The NAS only pulls that image, so no code folder and no `git` on the NAS are nee
 
 To update after code changes: push to `main`, wait for the green tick on the Actions tab, then redeploy the stack in Dockhand with "pull latest image".
 
+## One-off NZ downloads (the Data tab)
+
+The **Data** tab downloads New Zealand data once, with a progress bar for each item. All six boxes start ticked.
+
+| Item | Size (estimate) | Who does it |
+|---|---|---|
+| DOC walking experiences | ~5 MB | Walkbox, into its database |
+| National tracks (council and other) | ~60 MB | Walkbox, into its database |
+| Walkbox's own store: OpenStreetMap walks | ~20–60 MB | Walkbox, square by square from the Overpass servers (nearest Auckland first) |
+| Raw OSM extract | ~400 MB | Walkbox, saved as `data/osm/new-zealand-latest.osm.pbf`; a stopped download carries on from where it stopped |
+| Valhalla routing tiles | ~1–2 GB | The `walkbox-valhalla` container builds them; Walkbox shows its progress |
+| Self-hosted Overpass database | ~3–6 GB | The `walkbox-overpass` container imports it; Walkbox shows its progress |
+
+Once the stored walks are in, **Find** answers from Walkbox's own database (no waiting on the public servers) and opening a DOC or
+council track needs no lookup. OpenStreetMap squares are used as soon as each one is done; areas not reached yet still use the live
+servers. When your own Overpass server is ready, Walkbox asks it first and falls back to the public ones. Downloads run in the
+background, survive a restart and can be cancelled. The first start queues everything for all of NZ (set `SEED_AUTOSTART` to `0` to
+start them yourself). Create the `/volume1/docker/walkbox/overpass` folder before deploying.
+
 ## Settings (environment variables)
 
 | Name | Default | Meaning |
@@ -180,6 +199,12 @@ To update after code changes: push to `main`, wait for the green tick on the Act
 | PATH_HIGHWAYS | footway\|path\|track\|pedestrian | OSM path types used for "Named paths". |
 | ROUTE_TYPES | hiking\|foot\|walking | OSM route types to include. |
 | OVERPASS_URLS | overpass-api.de, overpass.kumi.systems | Comma-separated Overpass servers, tried in order. |
+| OVERPASS_LOCAL_URL | (blank) | Your own Overpass server; asked first once it answers. |
+| SEED_AUTOSTART | 1 | Queue the NZ downloads on the very first start. |
+| OSM_EXTRACT_URL | Geofabrik NZ .osm.pbf | File fetched by "Raw OSM extract". |
+| SEED_CELL_DEG | 0.5 | Size of each square when storing OpenStreetMap walks. |
+| SEED_TIMEOUT | 180 | Seconds one big download request may take. |
+| SEED_PAUSE_SECONDS | 1.5 | Pause between big requests to the public servers. |
 
 ## Backup
 

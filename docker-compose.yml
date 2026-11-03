@@ -4,14 +4,21 @@ services:
     image: ghcr.io/deepakgaur84/walkbox:latest
     container_name: walkbox
     volumes:
-      # Holds walkbox.db. Must exist before deploy.
+      # Holds walkbox.db and the downloaded NZ files. Must exist before deploy.
       - /volume1/docker/walkbox/data:/data
+      # Read-only views of the two big builds, only so the Data tab can show how large they are so far.
+      - /volume1/docker/walkbox/valhalla:/valhalla:ro
+      - /volume1/docker/walkbox/overpass:/overpass:ro
     environment:
       DB_PATH: /data/walkbox.db
       MAX_SPAN_DEG: "0.5"
       MAX_RESULTS: "150"
       # Turn-by-turn routing engine below (container name and internal port).
       VALHALLA_URL: http://walkbox-valhalla:8002
+      # Own Overpass server (below). Walkbox asks it first once it is ready, and the public servers otherwise.
+      OVERPASS_LOCAL_URL: http://walkbox-overpass/api/interpreter
+      # First start queues the one-off NZ downloads (set to "0" to start them yourself from the Data tab).
+      SEED_AUTOSTART: "1"
     # Public DNS so the container can reach the OpenStreetMap servers.
     dns:
       - 1.1.1.1
@@ -31,6 +38,28 @@ services:
     environment:
       tile_urls: https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf
       server_threads: "2"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    networks:
+      - proxynet
+    restart: unless-stopped
+
+  walkbox-overpass:
+    # Your own OpenStreetMap query server for NZ, so searches never wait on the busy public ones.
+    # First start downloads NZ and imports it (a few GB, can take hours); watch the container log.
+    image: wiso/overpass-api:latest
+    container_name: walkbox-overpass
+    volumes:
+      # Holds the imported database. Must exist before deploy.
+      - /volume1/docker/walkbox/overpass:/db
+    environment:
+      OVERPASS_MODE: init
+      OVERPASS_META: "no"
+      OVERPASS_PLANET_URL: https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.bz2
+      OVERPASS_DIFF_URL: https://download.geofabrik.de/australia-oceania/new-zealand-updates/
+      OVERPASS_RULES_LOAD: "10"
+      OVERPASS_STOP_AFTER_INIT: "false"
     dns:
       - 1.1.1.1
       - 8.8.8.8

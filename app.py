@@ -15,6 +15,7 @@ import math
 import os
 import re
 import sqlite3
+import shutil
 import threading
 import time
 import zlib
@@ -51,6 +52,14 @@ PHOTOS_PER_MIN = int(os.environ.get("PHOTOS_PER_MINUTE", "30"))
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "").strip().rstrip("/")
 ELEVATION_URL = os.environ.get("ELEVATION_URL", "https://api.open-meteo.com/v1/elevation")
 DB_PATH = os.environ.get("DB_PATH", "/data/walkbox.db")
+DATA_DIR = os.path.dirname(DB_PATH) or "."
+OSM_EXTRACT_URL = os.environ.get("OSM_EXTRACT_URL", "https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf")
+OVERPASS_LOCAL_URL = os.environ.get("OVERPASS_LOCAL_URL", "").strip()    # e.g. http://walkbox-overpass/api/interpreter
+VALHALLA_DIR = os.environ.get("VALHALLA_DIR", "/valhalla")               # optional read-only mount, only to show the size
+OVERPASS_DIR = os.environ.get("OVERPASS_DIR", "/overpass")
+SEED_CELL_DEG = float(os.environ.get("SEED_CELL_DEG", "0.5"))
+SEED_TIMEOUT = int(os.environ.get("SEED_TIMEOUT", "180"))
+SEED_PAUSE = float(os.environ.get("SEED_PAUSE_SECONDS", "1.5"))          # a polite gap between big requests to the public servers
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "150"))
 MAX_PATH_WAYS = int(os.environ.get("MAX_PATH_WAYS", "2500"))
@@ -92,7 +101,7 @@ SOURCE_LABEL = {"osm-route": "OSM route", "osm-path": "OSM path", "doc": "DOC",
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
-_overpass_locks = {"bulk": threading.Lock(), "fast": threading.Lock()}   # the big searches and the lookups for an opened walk do not wait for each other
+_overpass_locks = {"bulk": threading.Lock(), "fast": threading.Lock(), "seed": threading.Lock()}   # the big searches and the lookups for an opened walk do not wait for each other
 _cache = {}  # walk id -> parsed walk (from recent searches)
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
@@ -126,6 +135,15 @@ CREATE TABLE IF NOT EXISTS walks (
 );
 CREATE INDEX IF NOT EXISTS walks_name ON walks(name);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, ts REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS store (
+    osm_id INTEGER PRIMARY KEY, source TEXT NOT NULL, name TEXT NOT NULL,
+    s REAL, w REAL, n REAL, e REAL, light TEXT NOT NULL, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS store_src ON store(source, s, n);
+CREATE TABLE IF NOT EXISTS seed_state (
+    item TEXT PRIMARY KEY, status TEXT NOT NULL, done REAL, total REAL, msg TEXT, finished REAL, updated REAL
+);
+CREATE TABLE IF NOT EXISTS seed_cells (item TEXT NOT NULL, cell TEXT NOT NULL, PRIMARY KEY (item, cell));
 """
 EXTRA_COLUMNS = {
     "source": "TEXT", "difficulty": "TEXT", "route_type": "TEXT", "ascent_m": "REAL",
@@ -430,9 +448,9 @@ def _short_error(url, exc):
     return "%s: %s" % (host, reason)
 
 
-def _overpass_once(url, query):
+def _overpass_once(url, query, timeout=None):
     try:
-        r = requests.post(url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=OVERPASS_TIMEOUT)
+        r = requests.post(url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=timeout or OVERPASS_TIMEOUT)
         if r.status_code != 200:
             raise RuntimeError("%s: HTTP %s" % (url.split("/")[2], r.status_code))
         data = r.json()
@@ -446,25 +464,44 @@ def _overpass_once(url, query):
         raise RuntimeError(_short_error(url, ex))
 
 
+_local_ok = {"ts": 0.0, "ok": False}
+
+
+def local_overpass_ready():
+    """True when the self-hosted Overpass container answers (checked at most once a minute)."""
+    if not OVERPASS_LOCAL_URL:
+        return False
+    now = time.time()
+    if now - _local_ok["ts"] > 60:
+        _local_ok["ts"] = now
+        try:
+            r = requests.get(OVERPASS_LOCAL_URL.rsplit("/", 1)[0] + "/status", headers={"User-Agent": USER_AGENT}, timeout=4)
+            _local_ok["ok"] = getattr(r, "status_code", 0) == 200
+        except requests.RequestException:
+            _local_ok["ok"] = False
+    return _local_ok["ok"]
+
+
 def overpass(query, lane="fast"):
     """Ask the first server; if it has not answered within a few seconds ask the next one as well, and use whoever answers first.
 
     lane "bulk" is for the list searches, "fast" for everything about a walk you have opened: they never queue behind each other.
     """
-    urls = OVERPASS_URLS
+    urls = ([OVERPASS_LOCAL_URL] if local_overpass_ready() else []) + OVERPASS_URLS
     if not urls:
         raise RuntimeError("No Overpass server configured")
     errors = []
+    limit = SEED_TIMEOUT if lane == "seed" else None            # the one-off download may ask for big areas
     with _overpass_locks.get(lane, _overpass_locks["fast"]):
         pool = ThreadPoolExecutor(max_workers=len(urls))
         try:
-            pending = {pool.submit(_overpass_once, urls[0], query): urls[0]}
+            pending = {pool.submit(_overpass_once, urls[0], query, limit): urls[0]}
             nxt = 1
             while pending:
                 hedge = HEDGE_SECONDS if nxt < len(urls) else None
                 done, _ = futures_wait(list(pending), timeout=hedge, return_when=FIRST_COMPLETED)
                 if not done:                                    # the server is slow: try the next one too
-                    pending[pool.submit(_overpass_once, urls[nxt], query)] = urls[nxt]
+                    pending[pool.submit(_overpass_once, urls[nxt], query, limit)] = urls[nxt]
                     nxt += 1
                     continue
                 for fut in done:
@@ -474,7 +511,7 @@ def overpass(query, lane="fast"):
                     except RuntimeError as ex:
                         errors.append(str(ex))
                 if not pending and nxt < len(urls):            # everything so far failed: try the next one
-                    pending[pool.submit(_overpass_once, urls[nxt], query)] = urls[nxt]
+                    pending[pool.submit(_overpass_once, urls[nxt], query, limit)] = urls[nxt]
                     nxt += 1
             raise RuntimeError("; ".join(errors))
         finally:
@@ -597,12 +634,12 @@ def _km(p):
     return v / 1000.0 if v > 0 else None
 
 
-def list_osm(s, w, n, e, want_routes, want_paths):
+def list_osm(s, w, n, e, want_routes, want_paths, max_rel=None, max_ways=None, lane="bulk", qtimeout=25):
     """Cheap OSM search: names, tags and bounding boxes only (no geometry).
 
     Exact tag matches (not regular expressions) and one global bbox keep the query fast on busy servers.
     """
-    head = "[out:json][timeout:25][bbox:%f,%f,%f,%f];" % (s, w, n, e)
+    head = "[out:json][timeout:%d][bbox:%f,%f,%f,%f];" % (qtimeout, s, w, n, e)
     rel_types = [t for t in ROUTE_TYPES.split("|") if t]
     way_types = [t for t in PATH_HIGHWAYS.split("|") if t]
     parts = [head]
@@ -612,11 +649,11 @@ def list_osm(s, w, n, e, want_routes, want_paths):
         parts.append("(%s)->.p;" % "".join(
             'way["highway"="%s"]["name"]["access"!~"^(private|no)$"]["foot"!="no"];' % t for t in way_types))
     if want_routes:
-        parts.append(".r out tags bb %d;" % MAX_RESULTS)
+        parts.append(".r out tags bb %d;" % (max_rel or MAX_RESULTS))
     if want_paths:
-        parts.append(".p out tags bb %d;" % MAX_PATH_WAYS)
+        parts.append(".p out tags bb %d;" % (max_ways or MAX_PATH_WAYS))
     walks, groups = [], {}
-    for el in overpass("".join(parts), lane="bulk").get("elements", []):
+    for el in overpass("".join(parts), lane=lane).get("elements", []):
         b = el.get("bounds")
         if not b:
             continue
@@ -624,7 +661,8 @@ def list_osm(s, w, n, e, want_routes, want_paths):
         if el.get("type") == "relation" and want_routes:
             name = tags.get("name") or tags.get("ref") or "Unnamed route %d" % el["id"]
             walks.append(make_light(el["id"], "osm-route", name, {"kind": "relation"}, tags,
-                                    centre=((b["minlat"] + b["maxlat"]) / 2, (b["minlon"] + b["maxlon"]) / 2)))
+                                    centre=((b["minlat"] + b["maxlat"]) / 2, (b["minlon"] + b["maxlon"]) / 2),
+                                    bb=[b["minlat"], b["minlon"], b["maxlat"], b["maxlon"]]))
         elif el.get("type") == "way" and want_paths:
             name = (tags.get("name") or "").strip()
             if not name or name.lower() in GENERIC_NAMES:
@@ -749,13 +787,14 @@ def overlaps_nz(s, w, n, e):
 def search_all(s, w, n, e, sources):
     """Fetch the light lists from every chosen source at the same time."""
     jobs = []
-    if "routes" in sources or "paths" in sources:
+    walks, problems = local_lists(s, w, n, e, sources)           # whatever the one-off download already holds
+    done_here = local_covered(s, w, n, e)
+    if ("routes" in sources or "paths" in sources) and "osm" not in done_here:
         jobs.append(("OpenStreetMap", lambda: list_osm(s, w, n, e, "routes" in sources, "paths" in sources)))
-    if "doc" in sources and overlaps_nz(s, w, n, e):
+    if "doc" in sources and overlaps_nz(s, w, n, e) and "doc" not in done_here:
         jobs.append(("DOC", lambda: list_doc(s, w, n, e)))
-    if "nz" in sources and overlaps_nz(s, w, n, e):
+    if "nz" in sources and overlaps_nz(s, w, n, e) and "nz" not in done_here:
         jobs.append(("NZ tracks", lambda: list_nz(s, w, n, e)))
-    walks, problems = [], []
     with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
         futures = [(label, pool.submit(fn)) for label, fn in jobs]
         for label, fut in futures:
@@ -787,7 +826,12 @@ def load_detail(wk):
     """Fetch the full route for one search result (on click or when adding it to the box)."""
     rec = wk.get("recipe") or {}
     kind = rec.get("kind")
-    full = None
+    full = stored_detail(wk["osm_id"])
+    if full:
+        full["osm_id"] = wk["osm_id"]
+        with _cache_lock:
+            _cache[wk["osm_id"]] = full
+        return full
     if kind == "relation":
         got = fetch_relations_by_ids([wk["osm_id"]])
         full = got[0] if got else None
@@ -2131,3 +2175,539 @@ def api_delete(osm_id):
     conn.execute("DELETE FROM walks WHERE osm_id=?", (osm_id,))
     conn.commit()
     return jsonify(ok=True)
+
+
+# --------------------------------------------------------------------------
+# One-off NZ downloads (the "Data" tab)
+# --------------------------------------------------------------------------
+# Items Walkbox downloads itself, in the order they run. The first two are small and quick.
+SEED_RUN_ORDER = ["store_doc", "store_nz", "store_osm", "osm_extract"]
+SEED_LABELS = {
+    "osm_extract": ("Raw OSM extract", "The whole-NZ OpenStreetMap file (about 400 MB), saved to the data folder."),
+    "valhalla": ("Valhalla routing tiles", "Built inside the walkbox-valhalla container (about 1–2 GB). Walkbox shows its progress."),
+    "overpass_db": ("Self-hosted Overpass database", "Imported inside the walkbox-overpass container (about 3–6 GB). Walkbox shows its progress."),
+    "store_osm": ("Walkbox's own store: OpenStreetMap walks", "Routes and named paths for all NZ, kept in Walkbox's database (about 20–60 MB)."),
+    "store_doc": ("DOC walking experiences", "Every DOC walk with its route (about 5 MB)."),
+    "store_nz": ("National tracks (council and other)", "Every council and other national track with its route (about 60 MB)."),
+}
+SEED_SHOW_ORDER = ["osm_extract", "valhalla", "overpass_db", "store_osm", "store_doc", "store_nz"]
+SEED_SERVICES = ("valhalla", "overpass_db")
+_seed_thread_lock = threading.Lock()
+_seed_thread = {"t": None}
+
+
+class SeedCancelled(Exception):
+    pass
+
+
+def raw_db():
+    """A database connection for the background worker (outside any web request)."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    return conn
+
+
+def seed_set(conn, item, status=None, done=None, total=None, msg=None):
+    row = conn.execute("SELECT * FROM seed_state WHERE item=?", (item,)).fetchone()
+    cur = dict(row) if row else {"status": "idle", "done": 0, "total": 0, "msg": "", "finished": None}
+    cur["status"] = status or cur["status"]
+    cur["done"] = cur["done"] if done is None else done
+    cur["total"] = cur["total"] if total is None else total
+    cur["msg"] = cur["msg"] if msg is None else msg
+    fin = time.time() if cur["status"] in ("done", "error", "cancelled") else cur["finished"]
+    conn.execute("INSERT OR REPLACE INTO seed_state (item,status,done,total,msg,finished,updated) VALUES (?,?,?,?,?,?,?)",
+                 (item, cur["status"], cur["done"], cur["total"], cur["msg"], fin, time.time()))
+    conn.commit()
+
+
+def seed_status(conn, item):
+    row = conn.execute("SELECT status FROM seed_state WHERE item=?", (item,)).fetchone()
+    return row["status"] if row else None
+
+
+def seed_check(conn, item, done=None, total=None, msg=None):
+    """Record progress; stop if the person pressed Cancel."""
+    if seed_status(conn, item) == "cancelling":
+        raise SeedCancelled()
+    seed_set(conn, item, done=done, total=total, msg=msg)
+
+
+def _arcgis_post(url, params, label, tries=3):
+    last = None
+    for attempt in range(tries):
+        try:
+            r = requests.post(url, data=params, headers={"User-Agent": USER_AGENT}, timeout=90)
+            data = r.json()
+            if r.status_code == 200 and "error" not in data:
+                return data
+            last = "%s error: %s" % (label, (data.get("error") or {}).get("message") or r.status_code)
+        except (requests.RequestException, ValueError) as ex:
+            last = _short_error(url, ex)
+        time.sleep(min(2 * (attempt + 1), 6) if SEED_PAUSE else 0)
+    raise RuntimeError(last)
+
+
+def _bbox_of(chains):
+    pts = [p for c in chains for p in c]
+    return min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)
+
+
+def store_put(conn, light, bbox, detail=None):
+    conn.execute("INSERT OR REPLACE INTO store (osm_id, source, name, s, w, n, e, light, detail) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (light["osm_id"], light["source"], light["name"], bbox[0], bbox[1], bbox[2], bbox[3],
+                  json.dumps(light), json.dumps(detail) if detail else None))
+
+
+def light_of(wk, recipe):
+    return make_light(wk["osm_id"], wk["source"], wk["name"], recipe, wk.get("tags") or {}, wk.get("distance_km"),
+                      False, (wk["lat"], wk["lon"]), description=wk.get("description"), difficulty=wk.get("difficulty"),
+                      time_text=wk.get("time_text"), region=wk.get("region"), link=wk.get("link"))
+
+
+def seed_doc(conn):
+    count = _arcgis_post(DOC_URL, {"where": "1=1", "returnCountOnly": "true", "f": "json"}, "DOC")["count"]
+    seed_check(conn, "store_doc", 0, count, "Downloading DOC walks…")
+    off = stored = 0
+    while off < count:
+        data = _arcgis_post(DOC_URL, {"where": "1=1", "outFields": "*", "outSR": 4326, "returnGeometry": "true", "f": "geojson",
+                                      "orderByFields": "OBJECTID", "resultOffset": off, "resultRecordCount": 100}, "DOC")
+        feats = data.get("features", [])
+        if not feats:
+            break
+        for wk in parse_doc(data):
+            oid = wk["osm_id"] - DOC_BASE
+            wk["recipe"] = {"kind": "doc", "oid": oid}
+            store_put(conn, light_of(wk, wk["recipe"]), _bbox_of(wk["chains"]), wk)
+            stored += 1
+        conn.commit()
+        off += len(feats)
+        seed_check(conn, "store_doc", min(off, count), count, "Downloaded %d DOC walks" % stored)
+        if SEED_PAUSE:
+            time.sleep(0.3)
+    seed_set(conn, "store_doc", "done", count, count, "%d DOC walks stored" % stored)
+
+
+def seed_nz(conn):
+    count = _arcgis_post(NZT_URL, {"where": NZ_WHERE, "returnCountOnly": "true", "f": "json"}, "NZ tracks")["count"]
+    seed_check(conn, "store_nz", 0, count, "Listing tracks…")
+    groups, last = {}, -1                                       # step 1: which pieces belong to which track (no geometry yet)
+    while True:
+        data = _arcgis_post(NZT_URL, {"where": "%s AND OBJECTID>%d" % (NZ_WHERE, last), "outFields": "OBJECTID,Name,MainTrail,LocalAuthority",
+                                      "returnGeometry": "false", "orderByFields": "OBJECTID", "resultRecordCount": 2000, "f": "json"}, "NZ tracks")
+        feats = data.get("features", [])
+        for f in feats:
+            p = _props(f)
+            last = max(last, int(p["objectid"]))
+            name = str(p.get("name") or p.get("maintrail") or "").strip()
+            if not name or name.lower() in GENERIC_NAMES:
+                continue
+            key = (name.lower(), str(p.get("localauthority") or "").lower())
+            groups.setdefault(key, {"name": name, "ids": []})["ids"].append(int(p["objectid"]))
+        seed_check(conn, "store_nz", 0, count, "Listing tracks… %d found" % len(groups))
+        if not feats:
+            break
+    batches, cur = [], []                                       # step 2: fetch the routes, whole tracks at a time
+    for key in sorted(groups):
+        cur.append(groups[key])
+        if sum(len(g["ids"]) for g in cur) >= 150:
+            batches.append(cur)
+            cur = []
+    if cur:
+        batches.append(cur)
+    done = stored = 0
+    for batch in batches:
+        ids = [i for g in batch for i in g["ids"]]
+        data = _arcgis_post(NZT_URL, {"where": "OBJECTID IN (%s)" % ",".join(str(i) for i in ids), "outFields": "*", "outSR": 4326,
+                                      "returnGeometry": "true", "f": "geojson", "resultRecordCount": 2000}, "NZ tracks")
+        by_id = {}
+        for f in data.get("features", []):
+            oid = _props(f).get("objectid", f.get("id"))
+            if oid is not None:
+                by_id[int(oid)] = f
+        for g in batch:
+            feats = [by_id[i] for i in g["ids"] if i in by_id]
+            got = [x for x in parse_nz_tracks({"features": feats}) if x["name"].lower() == g["name"].lower()]
+            if not got:
+                continue
+            wk = got[0]
+            sm = _nz_summary([{str(k).lower(): v for k, v in (f.get("properties") or {}).items()} for f in feats])
+            wk["osm_id"] = nz_light_id(g["name"], sm["authority"])
+            wk["recipe"] = {"kind": "nz", "name": g["name"], "bbox": list(_bbox_of(wk["chains"]))}
+            store_put(conn, light_of(wk, wk["recipe"]), _bbox_of(wk["chains"]), wk)
+            stored += 1
+        conn.commit()
+        done += len(ids)
+        seed_check(conn, "store_nz", done, count, "%d tracks stored" % stored)
+        if SEED_PAUSE:
+            time.sleep(0.3)
+    seed_set(conn, "store_nz", "done", count, count, "%d tracks stored" % stored)
+
+
+def seed_cells():
+    """The 0.5° squares that cover NZ, nearest Auckland first, so Auckland becomes usable early."""
+    step, cells = SEED_CELL_DEG, []
+    s = NZ_BOX[0]
+    while s < NZ_BOX[1]:
+        w = NZ_BOX[2]
+        while w < NZ_BOX[3]:
+            cells.append((round(s, 3), round(w, 3)))
+            w += step
+        s += step
+    cells.sort(key=lambda c: (c[0] - -36.85) ** 2 + (c[1] - 174.76) ** 2)
+    return cells
+
+
+def cell_id(s, w):
+    return "%.3f,%.3f" % (s, w)
+
+
+def _osm_cell(conn, s, w, n, e, depth=0):
+    """Store the walks of one square. A square the server cannot answer is split in four and tried again."""
+    try:
+        walks = list_osm(s, w, n, e, True, True, max_rel=3000, max_ways=40000, lane="seed", qtimeout=SEED_TIMEOUT)
+    except RuntimeError:
+        if depth >= 2:
+            raise
+        ms, mw = (s + n) / 2, (w + e) / 2
+        for a, b, c2, d in ((s, w, ms, mw), (s, mw, ms, e), (ms, w, n, mw), (ms, mw, n, e)):
+            _osm_cell(conn, a, b, c2, d, depth + 1)
+        return 0
+    for wk in walks:
+        if wk["source"] == "osm-route":
+            bb = wk.get("bb") or [wk["lat"], wk["lon"], wk["lat"], wk["lon"]]
+        else:
+            b = wk["recipe"]["bbox"]
+            bb = b
+        store_put(conn, wk, bb)
+    conn.commit()
+    return len(walks)
+
+
+def merge_osm_paths(conn):
+    """A path that runs across the edge of two squares was stored twice; join the two halves into one."""
+    rows = conn.execute("SELECT osm_id, name, s, w, n, e, light FROM store WHERE source='osm-path' ORDER BY name, s").fetchall()
+    i, merged = 0, 0
+    while i < len(rows):
+        j = i
+        while j < len(rows) and rows[j]["name"] == rows[i]["name"]:
+            j += 1
+        clusters = []                                                    # boxes of the same name that touch each other
+        for r in rows[i:j]:
+            hit = [c for c in clusters if not (r["n"] < c["s"] - 0.003 or r["s"] > c["n"] + 0.003 or r["e"] < c["w"] - 0.003 or r["w"] > c["e"] + 0.003)]
+            if not hit:
+                clusters.append({"s": r["s"], "w": r["w"], "n": r["n"], "e": r["e"], "rows": [r]})
+                continue
+            base = hit[0]
+            for other in hit[1:]:
+                base["rows"] += other["rows"]
+                base["s"], base["w"] = min(base["s"], other["s"]), min(base["w"], other["w"])
+                base["n"], base["e"] = max(base["n"], other["n"]), max(base["e"], other["e"])
+                clusters.remove(other)
+            base["rows"].append(r)
+            base["s"], base["w"], base["n"], base["e"] = min(base["s"], r["s"]), min(base["w"], r["w"]), max(base["n"], r["n"]), max(base["e"], r["e"])
+        for c in clusters:
+            if len(c["rows"]) < 2:
+                continue
+            first = json.loads(c["rows"][0]["light"])
+            first["distance_km"] = round(sum(json.loads(r["light"]).get("distance_km") or 0 for r in c["rows"]), 2)
+            first["lat"], first["lon"] = (c["s"] + c["n"]) / 2, (c["w"] + c["e"]) / 2
+            first["osm_id"] = PATH_BASE + zlib.crc32(("%s|%.2f|%.2f" % (first["name"], first["lat"], first["lon"])).encode("utf-8"))
+            first["recipe"] = {"kind": "path", "name": first["name"], "bbox": [c["s"], c["w"], c["n"], c["e"]]}
+            conn.executemany("DELETE FROM store WHERE osm_id=?", [(r["osm_id"],) for r in c["rows"]])
+            store_put(conn, first, (c["s"], c["w"], c["n"], c["e"]))
+            merged += len(c["rows"]) - 1
+        i = j
+    conn.commit()
+    return merged
+
+
+def seed_osm(conn):
+    cells = seed_cells()
+    done_cells = {r["cell"] for r in conn.execute("SELECT cell FROM seed_cells WHERE item='store_osm'")}
+    seed_check(conn, "store_osm", len(done_cells), len(cells), "Starting near Auckland…")
+    for s, w in cells:
+        cid = cell_id(s, w)
+        if cid in done_cells:
+            continue
+        count = _osm_cell(conn, s, w, s + SEED_CELL_DEG, w + SEED_CELL_DEG)
+        conn.execute("INSERT OR IGNORE INTO seed_cells (item, cell) VALUES ('store_osm', ?)", (cid,))
+        conn.commit()
+        done_cells.add(cid)
+        seed_check(conn, "store_osm", len(done_cells), len(cells),
+                   "%d of %d squares done (last square: %d walks)" % (len(done_cells), len(cells), count))
+        if SEED_PAUSE:
+            time.sleep(SEED_PAUSE)
+    merged = merge_osm_paths(conn)
+    total = conn.execute("SELECT COUNT(*) FROM store WHERE source IN ('osm-route','osm-path')").fetchone()[0]
+    seed_set(conn, "store_osm", "done", len(cells), len(cells), "%d OpenStreetMap walks stored (%d joined across square edges)" % (total, merged))
+
+
+def seed_extract(conn):
+    name = OSM_EXTRACT_URL.rstrip("/").rsplit("/", 1)[-1] or "extract.osm.pbf"
+    folder = os.path.join(DATA_DIR, "osm")
+    os.makedirs(folder, exist_ok=True)
+    dest, part = os.path.join(folder, name), os.path.join(folder, name) + ".part"
+    if os.path.exists(dest):
+        size = os.path.getsize(dest)
+        seed_set(conn, "osm_extract", "done", size, size, "Already saved: %s (%.0f MB)" % (name, size / 1e6))
+        return
+    pos = os.path.getsize(part) if os.path.exists(part) else 0
+    headers = {"User-Agent": USER_AGENT}
+    if pos:
+        headers["Range"] = "bytes=%d-" % pos
+    try:
+        r = requests.get(OSM_EXTRACT_URL, headers=headers, stream=True, timeout=(20, 60))
+    except requests.RequestException as ex:
+        raise RuntimeError(_short_error(OSM_EXTRACT_URL, ex))
+    if r.status_code == 416:                                   # the part file already holds everything
+        os.replace(part, dest)
+        size = os.path.getsize(dest)
+        seed_set(conn, "osm_extract", "done", size, size, "Saved %s (%.0f MB)" % (name, size / 1e6))
+        return
+    if r.status_code not in (200, 206):
+        raise RuntimeError("%s: HTTP %s" % (OSM_EXTRACT_URL.split("/")[2], r.status_code))
+    if r.status_code == 200:
+        pos = 0                                                # the server ignored the resume request
+    total = pos + int(r.headers.get("Content-Length") or 0)
+    free = shutil.disk_usage(folder).free
+    if total and free < (total - pos) * 1.05:
+        raise RuntimeError("Not enough free space in the data folder: need %.0f MB, have %.0f MB" % ((total - pos) / 1e6, free / 1e6))
+    seed_check(conn, "osm_extract", pos, total, "Downloading %s…" % name)
+    last = time.time()
+    try:
+        with open(part, "ab" if pos else "wb") as fh:
+            for chunk in r.iter_content(1 << 20):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                pos += len(chunk)
+                if time.time() - last > 1.5:
+                    last = time.time()
+                    seed_check(conn, "osm_extract", pos, total, "Downloading %s: %.0f of %.0f MB" % (name, pos / 1e6, total / 1e6))
+    except requests.RequestException as ex:
+        raise RuntimeError("Download interrupted (%s). Press Download again to carry on from where it stopped." % _short_error(OSM_EXTRACT_URL, ex))
+    if total and pos < total:
+        raise RuntimeError("Download stopped early. Press Download again to carry on from where it stopped.")
+    os.replace(part, dest)
+    seed_set(conn, "osm_extract", "done", pos, pos, "Saved %s (%.0f MB) in the data folder" % (name, pos / 1e6))
+
+
+SEED_FUNCS = {"store_doc": seed_doc, "store_nz": seed_nz, "store_osm": seed_osm, "osm_extract": seed_extract}
+
+
+def seed_run_one(conn, item):
+    seed_set(conn, item, "running")
+    try:
+        SEED_FUNCS[item](conn)
+    except SeedCancelled:
+        seed_set(conn, item, "cancelled", msg="Cancelled. Press Download to carry on.")
+    except Exception as ex:                                      # a failed item must never stop the others
+        app.logger.warning("seed %s failed: %s", item, ex)
+        seed_set(conn, item, "error", msg=str(ex)[:300])
+
+
+def seed_queue(conn, items):
+    queued = []
+    for item in SEED_RUN_ORDER:
+        if item in items and seed_status(conn, item) not in ("queued", "running", "cancelling"):
+            seed_set(conn, item, "queued", done=0, total=0, msg="Waiting in line…")
+            queued.append(item)
+    return queued
+
+
+def seed_next(conn):
+    for item in SEED_RUN_ORDER:
+        if seed_status(conn, item) == "queued":
+            return item
+    return None
+
+
+def seed_startup(conn):
+    """On every start: carry on what a restart interrupted. On the very first start: queue everything for all of NZ."""
+    for item in SEED_RUN_ORDER:
+        if seed_status(conn, item) in ("running", "cancelling"):
+            seed_set(conn, item, "queued", msg="Carrying on after a restart…")
+    if os.environ.get("SEED_AUTOSTART", "1") == "1" and conn.execute("SELECT COUNT(*) FROM seed_state").fetchone()[0] == 0:
+        seed_queue(conn, SEED_RUN_ORDER)
+
+
+def _seed_loop():
+    first = True
+    while True:
+        try:
+            conn = raw_db()
+            if first:
+                first = False
+                seed_startup(conn)
+            item = seed_next(conn)
+            if item:
+                seed_run_one(conn, item)
+            conn.close()
+            if not item:
+                time.sleep(5)
+        except Exception as ex:                                  # keep the worker alive
+            app.logger.warning("seed worker: %s", ex)
+            time.sleep(15)
+
+
+def seed_start_worker():
+    if os.environ.get("SEED_RUNNER", "1") != "1":                 # switched off (the tests drive the jobs by hand)
+        return
+    with _seed_thread_lock:
+        if _seed_thread["t"] is None or not _seed_thread["t"].is_alive():
+            t = threading.Thread(target=_seed_loop, name="walkbox-seed", daemon=True)
+            _seed_thread["t"] = t
+            t.start()
+
+
+# --- what the download already holds, used by search and by opening a walk -----------------------------
+def store_done(item):
+    return seed_status(db(), item) == "done"
+
+
+def local_covered(s, w, n, e):
+    """Which sources the local store can answer for this area: 'doc', 'nz', 'osm'."""
+    out = set()
+    if store_done("store_doc"):
+        out.add("doc")
+    if store_done("store_nz"):
+        out.add("nz")
+    cells = seed_cells_for(s, w, n, e)
+    if cells:
+        have = {r["cell"] for r in db().execute("SELECT cell FROM seed_cells WHERE item='store_osm'")}
+        if all(c in have for c in cells):
+            out.add("osm")
+    return out
+
+
+def seed_cells_for(s, w, n, e):
+    if not overlaps_nz(s, w, n, e):
+        return []
+    step = SEED_CELL_DEG
+    out = []
+    r = math.floor((max(s, NZ_BOX[0]) - NZ_BOX[0]) / step + 1e-9)
+    while NZ_BOX[0] + r * step < min(n, NZ_BOX[1]):
+        c = math.floor((max(w, NZ_BOX[2]) - NZ_BOX[2]) / step + 1e-9)
+        while NZ_BOX[2] + c * step < min(e, NZ_BOX[3]):
+            out.append(cell_id(round(NZ_BOX[0] + r * step, 3), round(NZ_BOX[2] + c * step, 3)))
+            c += 1
+        r += 1
+    return out
+
+
+def local_lists(s, w, n, e, sources):
+    covered = local_covered(s, w, n, e)
+    kinds = []
+    if "doc" in sources and "doc" in covered:
+        kinds.append("doc")
+    if "nz" in sources and "nz" in covered:
+        kinds.append("nz-track")
+    if "osm" in covered:
+        if "routes" in sources:
+            kinds.append("osm-route")
+        if "paths" in sources:
+            kinds.append("osm-path")
+    if not kinds:
+        return [], []
+    rows = db().execute(
+        "SELECT light FROM store WHERE source IN (%s) AND s <= ? AND n >= ? AND w <= ? AND e >= ? LIMIT 4000" % ",".join("?" * len(kinds)),
+        kinds + [n, s, e, w]).fetchall()
+    return [json.loads(r["light"]) for r in rows], []
+
+
+def stored_detail(osm_id):
+    row = db().execute("SELECT detail FROM store WHERE osm_id=? AND detail IS NOT NULL", (osm_id,)).fetchone()
+    return json.loads(row["detail"]) if row else None
+
+
+# --- live status of the two services that build themselves -------------------------------------------
+_size_cache = {}
+
+
+def folder_size(path):
+    now = time.time()
+    hit = _size_cache.get(path)
+    if hit and now - hit[0] < 30:
+        return hit[1]
+    total = 0
+    if os.path.isdir(path):
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+    _size_cache[path] = (now, total)
+    return total
+
+
+def service_status(item):
+    if item == "valhalla":
+        if not VALHALLA_URL:
+            return {"status": "off", "msg": "Not set up (no VALHALLA_URL)."}
+        size = folder_size(VALHALLA_DIR)
+        extra = " (%.0f MB on disk so far)" % (size / 1e6) if size else ""
+        try:
+            r = requests.get(VALHALLA_URL + "/status", headers={"User-Agent": USER_AGENT}, timeout=4)
+            if getattr(r, "status_code", 0) == 200:
+                return {"status": "done", "msg": "Ready: walking directions work" + extra}
+        except requests.RequestException:
+            pass
+        return {"status": "running", "msg": "The container is downloading the map and building tiles" + extra + ". Watch its log for detail."}
+    if not OVERPASS_LOCAL_URL:
+        return {"status": "off", "msg": "Not set up (no OVERPASS_LOCAL_URL; add the walkbox-overpass service from the compose file)."}
+    size = folder_size(OVERPASS_DIR)
+    extra = " (%.1f GB on disk so far)" % (size / 1e9) if size else ""
+    _local_ok["ts"] = 0
+    if local_overpass_ready():
+        return {"status": "done", "msg": "Ready: Walkbox now asks it first" + extra}
+    return {"status": "running", "msg": "The container is downloading and importing NZ" + extra + ". It can take hours; Walkbox uses the public servers until it is ready."}
+
+
+def seed_overview(conn):
+    rows = {r["item"]: dict(r) for r in conn.execute("SELECT * FROM seed_state")}
+    items = []
+    for item in SEED_SHOW_ORDER:
+        label, note = SEED_LABELS[item]
+        d = {"id": item, "label": label, "note": note, "service": item in SEED_SERVICES,
+             "status": "idle", "done": 0, "total": 0, "msg": ""}
+        if item in SEED_SERVICES:
+            d.update(service_status(item))
+        elif item in rows:
+            r = rows[item]
+            d.update(status=r["status"], done=r["done"] or 0, total=r["total"] or 0, msg=r["msg"] or "")
+        items.append(d)
+    return items
+
+
+@app.get("/api/seed")
+def api_seed_status():
+    items = seed_overview(db())
+    return jsonify(items=items, busy=any(i["status"] in ("queued", "running", "cancelling") and not i["service"] for i in items))
+
+
+@app.post("/api/seed")
+def api_seed_start():
+    b = request.get_json(silent=True) or {}
+    wanted = [x for x in (b.get("items") or []) if x in SEED_FUNCS]
+    seed_queue(db(), wanted)
+    seed_start_worker()
+    return api_seed_status()
+
+
+@app.post("/api/seed/cancel")
+def api_seed_cancel():
+    conn = db()
+    for item in SEED_RUN_ORDER:
+        st = seed_status(conn, item)
+        if st == "queued":
+            seed_set(conn, item, "cancelled", msg="Cancelled.")
+        elif st == "running":
+            seed_set(conn, item, "cancelling", msg="Stopping…")
+    return api_seed_status()
+
+
+if os.environ.get("SEED_RUNNER", "1") == "1":
+    seed_start_worker()

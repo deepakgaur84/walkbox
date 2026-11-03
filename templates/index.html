@@ -117,6 +117,19 @@
   .acts a, .acts button { font-size:13px; }
   a.dl { background:var(--brand); color:#fff; padding:5px 10px; border-radius:6px; text-decoration:none; white-space:nowrap; }
   button.del { background:none; border:0; color:var(--warn); cursor:pointer; padding:0; }
+  #dataPanel { overflow:auto; flex:1; }
+  .dp-h { padding:10px 12px 4px; font-weight:700; }
+  .dp-note { padding:6px 12px; font-size:12px; color:var(--mute); }
+  .dp { padding:8px 12px; border-bottom:1px solid var(--line); }
+  .dp label { display:flex; gap:8px; align-items:flex-start; cursor:pointer; }
+  .dp .t { font-weight:600; font-size:14px; }
+  .dp .n { font-size:12px; color:var(--mute); }
+  .dp .bar { height:8px; background:#e6ece8; border-radius:5px; margin:6px 0 2px 24px; overflow:hidden; }
+  .dp .bar i { display:block; height:100%; background:var(--brand); width:0; transition:width .5s; }
+  .dp .bar.ind i { width:35%; animation:dpslide 1.6s infinite ease-in-out; }
+  @keyframes dpslide { 0% { margin-left:-35%; } 100% { margin-left:100%; } }
+  .dp .st { margin-left:24px; font-size:12px; }
+  .dp .st.err { color:var(--warn); } .dp .st.ok { color:#2e7d32; }
   .foot { padding:6px 10px; font-size:11px; color:var(--mute); border-top:1px solid var(--line); }
   @media (max-width:800px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:55vh; } #mapwrap { height:45vh; flex:none; } }
 </style>
@@ -127,6 +140,7 @@
   <nav>
     <button id="tabFind" class="active">Find walks</button>
     <button id="tabBox">My walk box</button>
+    <button id="tabData">Data</button>
   </nav>
 </header>
 <main>
@@ -157,6 +171,16 @@
     <div id="findActions" class="tools" style="display:none">
       <button class="b" id="addSelBtn">Add selected to my box</button>
       <button class="b alt" id="selAllBtn">Select all</button>
+    </div>
+    <div id="dataPanel" style="display:none">
+      <div class="dp-h">One-off downloads for all of New Zealand</div>
+      <div id="dataItems"><div class="dp-note">Loading…</div></div>
+      <div class="tools">
+        <button class="b" id="dataGo">Download selected</button>
+        <button class="b alt" id="dataStop">Cancel</button>
+      </div>
+      <div class="dp-note">Downloads run in the background and carry on if you close this page or Walkbox restarts. Walks stored here are found instantly in Find, and routes open without waiting for OpenStreetMap.
+        Routing tiles and the Overpass database are built by their own containers; this page only shows how far they have got.</div>
     </div>
     <div id="status">Finding your location…</div>
     <div id="list"></div>
@@ -219,10 +243,15 @@ function saveFindState() {
 }
 function setMode(m) {
   if (m === mode) return;
-  saveFindState();
+  if (mode !== 'data') saveFindState();
   mode = m; origin = null; if (typeof clearSelection === 'function') clearSelection(); if (typeof clearRoute === 'function') clearRoute();
   $('tabFind').classList.toggle('active', m === 'find');
   $('tabBox').classList.toggle('active', m === 'box');
+  $('tabData').classList.toggle('active', m === 'data');
+  $('dataPanel').style.display = m === 'data' ? '' : 'none';
+  $('status').style.display = $('list').style.display = m === 'data' ? 'none' : '';
+  if (m === 'data') { ['findTools', 'boxTools', 'findActions'].forEach(i => $(i).style.display = 'none'); selected.clear(); layerGroup.clearLayers(); results = []; render(); startDataPoll(); return; }
+  stopDataPoll();
   $('findTools').style.display = m === 'find' ? '' : 'none';
   $('findActions').style.display = m === 'find' && results.length ? '' : 'none';
   $('boxTools').style.display = m === 'box' ? '' : 'none';
@@ -236,6 +265,53 @@ function setMode(m) {
 }
 $('tabFind').onclick = () => setMode('find');
 $('tabBox').onclick = () => setMode('box');
+$('tabData').onclick = () => setMode('data');
+
+// ---- Data tab: one-off downloads with progress
+const dataChecked = new Set(['osm_extract', 'valhalla', 'overpass_db', 'store_osm', 'store_doc', 'store_nz']);
+let dataTimer = null, dataBusy = false;
+const DATA_WORDS = {idle: 'Not downloaded', queued: 'Queued', running: 'Downloading…', cancelling: 'Stopping…', done: 'Done',
+                    error: 'Failed', cancelled: 'Cancelled', off: 'Not set up'};
+function renderData(items) {
+  const box = $('dataItems');
+  if (!box.querySelector('.dp')) {
+    box.innerHTML = '';
+    items.forEach(it => {
+      const row = document.createElement('div'); row.className = 'dp'; row.id = 'dp-' + it.id;
+      row.innerHTML = '<label><input type="checkbox"><span><span class="t"></span><br><span class="n"></span></span></label>' +
+        '<div class="bar"><i></i></div><div class="st"></div>';
+      const cb = row.querySelector('input'); cb.checked = dataChecked.has(it.id);
+      cb.onchange = () => { cb.checked ? dataChecked.add(it.id) : dataChecked.delete(it.id); };
+      box.appendChild(row);
+    });
+  }
+  items.forEach(it => {
+    const row = $('dp-' + it.id); if (!row) return;
+    row.querySelector('.t').textContent = it.label;
+    row.querySelector('.n').textContent = it.note;
+    const bar = row.querySelector('.bar'), fill = bar.querySelector('i');
+    const active = it.status === 'running' || it.status === 'queued' || it.status === 'cancelling';
+    const pct = it.status === 'done' ? 100 : (it.total > 0 ? Math.min(100, Math.round(100 * it.done / it.total)) : 0);
+    bar.classList.toggle('ind', active && it.total <= 0);
+    fill.style.width = (bar.classList.contains('ind') ? 35 : pct) + '%';
+    const st = row.querySelector('.st');
+    st.className = 'st' + (it.status === 'error' ? ' err' : it.status === 'done' ? ' ok' : '');
+    st.textContent = (DATA_WORDS[it.status] || it.status) + (it.status === 'running' && it.total > 0 ? ' ' + pct + '%' : '') + (it.msg ? ' · ' + it.msg : '');
+  });
+}
+async function pollData() {
+  try {
+    const r = await fetch('/api/seed'); const d = await r.json();
+    if (d.items) { renderData(d.items); dataBusy = d.busy; $('dataGo').disabled = dataBusy; }
+  } catch (e) { /* the next poll tries again */ }
+}
+function startDataPoll() { pollData(); if (!dataTimer) dataTimer = setInterval(pollData, 2000); }
+function stopDataPoll() { if (dataTimer) { clearInterval(dataTimer); dataTimer = null; } }
+$('dataGo').onclick = async () => {
+  const r = await fetch('/api/seed', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: [...dataChecked]})});
+  const d = await r.json(); if (d.items) renderData(d.items); pollData();
+};
+$('dataStop').onclick = async () => { await fetch('/api/seed/cancel', {method: 'POST'}); pollData(); };
 
 async function post(url, body, signal) {
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body), signal});

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
 os.environ["VALHALLA_URL"] = "http://valhalla:8002"
 os.environ["SEARCH_CACHE_SECONDS"] = "0"   # the search cache is switched on explicitly in its own test
+os.environ["SEED_RUNNER"] = "0"; os.environ["SEED_PAUSE_SECONDS"] = "0"   # the background worker is driven by hand in tests
 import app as wb  # noqa: E402
 
 
@@ -887,3 +888,182 @@ assert b"gphoto" not in page and b"googleapis" not in page and b"GOOGLE_PLACES" 
 assert c.delete("/api/walks/111").get_json()["ok"]
 assert len(lib("")) == 3 + 2
 print("ALL TESTS PASSED")
+
+
+# ==========================================================================
+# One-off NZ downloads (Data tab)
+# ==========================================================================
+import re as _re
+import shutil as _shutil
+
+real_get_saved = wb.requests.get
+real_arcgis_post = wb._arcgis_post
+real_arcgis_get = wb._arcgis_get
+
+
+def seed_fake_post(url, params, label, tries=3):
+    if "b5ADKIcWivL5vNaV" in url:
+        if params.get("returnCountOnly"):
+            return {"count": len(NZ_ROWS)}
+        if params.get("returnGeometry") == "false":
+            after = int(_re.search(r"OBJECTID>(-?\d+)", params["where"]).group(1))
+            return {"features": [f for f in NZT_LIST["features"] if f["attributes"]["OBJECTID"] > after]}
+        ids = {int(x) for x in _re.search(r"IN \(([\d,]+)\)", params["where"]).group(1).split(",")}
+        return {"features": [f for f in NZT_DETAIL["features"] if f["id"] in ids]}
+    if params.get("returnCountOnly"):
+        return {"count": 1}
+    return DOC_DETAIL if int(params.get("resultOffset", 0)) == 0 else {"features": []}
+
+
+wb._arcgis_post = seed_fake_post
+conn = wb.raw_db()
+
+# Nothing is downloaded yet: the Data tab lists all six items, the two services report on themselves
+ov = c.get("/api/seed").get_json()
+assert [i["id"] for i in ov["items"]] == ["osm_extract", "valhalla", "overpass_db", "store_osm", "store_doc", "store_nz"], ov
+assert all(i["status"] == "idle" for i in ov["items"] if not i["service"]) and ov["busy"] is False
+assert {i["id"] for i in ov["items"] if i["service"]} == {"valhalla", "overpass_db"}
+assert [i for i in ov["items"] if i["id"] == "overpass_db"][0]["status"] == "off"                        # no OVERPASS_LOCAL_URL yet
+
+# Queueing: runnable items wait in line in a fixed order, the two services are ignored
+q = c.post("/api/seed", json={"items": ["osm_extract", "valhalla", "store_doc", "store_osm", "bogus"]}).get_json()
+st = {i["id"]: i["status"] for i in q["items"]}
+assert st["store_doc"] == st["store_osm"] == st["osm_extract"] == "queued" and st["store_nz"] == "idle" and q["busy"] is True, st
+assert wb.seed_next(conn) == "store_doc"
+c.post("/api/seed/cancel")
+st = {i["id"]: i["status"] for i in c.get("/api/seed").get_json()["items"]}
+assert st["store_doc"] == "cancelled" and wb.seed_next(conn) is None                                      # a queued item can be cancelled
+assert c.post("/api/seed", json={"items": ["store_doc"]}).get_json()["busy"] is True                       # and queued again
+
+# DOC and national tracks: stored with the route, one entry per track, same ids the live lists use
+wb.seed_run_one(conn, "store_doc"); wb.seed_run_one(conn, "store_nz")
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["store_doc"]["status"] == "done" and ov["store_doc"]["done"] == 1 and "1 DOC walks" in ov["store_doc"]["msg"], ov["store_doc"]
+assert ov["store_nz"]["status"] == "done", ov["store_nz"]
+rows = {r["name"]: r for r in conn.execute("SELECT * FROM store")}
+assert set(rows) == {"Test Kauri Track"}.union({"Takapuna Beach Walkway"}) or "Takapuna Beach Walkway" in rows, list(rows)
+assert rows["Test Kauri Track"]["source"] in ("doc", "nz-track")
+doc_row = conn.execute("SELECT * FROM store WHERE source='doc'").fetchone()
+assert doc_row["osm_id"] == wb.DOC_BASE + 7 and doc_row["detail"] and json.loads(doc_row["light"])["difficulty"] == "Easy"
+nzk = conn.execute("SELECT * FROM store WHERE source='nz-track' AND name='Takapuna Beach Walkway'").fetchone()
+assert nzk["osm_id"] == wb.nz_light_id("Takapuna Beach Walkway", "Auckland Council") and len(json.loads(nzk["detail"])["chains"]) >= 1
+assert conn.execute("SELECT COUNT(*) FROM store WHERE name='Bit of Path'").fetchone()[0] == 0              # too short, like the live list
+
+# OpenStreetMap walks: stored square by square; a square is usable as soon as it is done
+wb.seed_cells = lambda: [(-37.0, 174.5), (-37.0, 175.0)]
+wb.overpass = fake_overpass
+wb.seed_run_one(conn, "store_osm")
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["store_osm"]["status"] == "done" and ov["store_osm"]["total"] == 2, ov["store_osm"]
+assert conn.execute("SELECT COUNT(*) FROM seed_cells WHERE item='store_osm'").fetchone()[0] == 2
+assert conn.execute("SELECT COUNT(*) FROM store WHERE source='osm-path' AND name='Rocky Headland Track'").fetchone()[0] == 1   # not stored twice
+assert conn.execute("SELECT COUNT(*) FROM store WHERE source='osm-route' AND osm_id=111").fetchone()[0] == 1
+
+# Searching now needs no map server and no ArcGIS at all
+def nope(*a, **k): raise AssertionError("went to the internet")
+wb.overpass = nope; wb.requests.get = nope; wb._arcgis_get = nope
+box_akl = {"south": -36.85, "west": 174.74, "north": -36.76, "east": 174.80}
+r = c.post("/api/search", json=dict(box_akl, sources=["doc", "nz", "routes", "paths"])).get_json()
+names = {x["name"]: x["source"] for x in r["results"]}
+assert names.get("Takapuna Beach Walkway") == "nz-track" and names.get("Rocky Headland Track") == "osm-path" and not r["warnings"], names
+assert "Tiny Alley" not in names                                                                           # same rules as the live search
+r = c.post("/api/search", json={"south": -36.1, "west": 173.95, "north": -35.95, "east": 174.05, "sources": ["doc"]}).get_json()
+assert [x["name"] for x in r["results"]] == ["Test Kauri Track"] and r["results"][0]["source"] == "doc"
+# an area the download has not reached yet still goes to the live servers
+live_calls = []
+wb.overpass = lambda q, lane=None: (live_calls.append(q), {"elements": []})[1]
+c.post("/api/search", json={"south": -41.3, "west": 174.7, "north": -41.25, "east": 174.8, "sources": ["paths"]})
+assert len(live_calls) == 1
+wb.overpass = nope
+# opening a stored walk gives the route straight away
+did = [x for x in c.post("/api/search", json=dict(box_akl, sources=["nz"])).get_json()["results"] if x["name"] == "Takapuna Beach Walkway"][0]["osm_id"]
+d = c.post("/api/detail", json={"id": did}).get_json()
+assert d["line"] and d["name"] == "Takapuna Beach Walkway", d
+wb.requests.get, wb._arcgis_get, wb.overpass = fake_get, real_arcgis_get, fake_overpass
+
+# Paths cut by the edge of two squares are joined
+conn.execute("DELETE FROM store"); conn.commit()
+for a, b, sw in ((-36.51, -36.50, "x"), (-36.50, -36.49, "y")):
+    lt = wb.make_light(wb.PATH_BASE + (1 if sw == "x" else 2), "osm-path", "Edge Walk", {"kind": "path", "name": "Edge Walk", "bbox": [a, 174.5, b, 174.51]}, {}, 0.7, True, ((a + b) / 2, 174.505))
+    wb.store_put(conn, lt, (a, 174.5, b, 174.51))
+wb.store_put(conn, wb.make_light(wb.PATH_BASE + 3, "osm-path", "Far Walk", {"kind": "path", "name": "Far Walk", "bbox": [-40, 170, -39.9, 170.1]}, {}, 0.9, True, (-39.95, 170.05)), (-40, 170, -39.9, 170.1))
+conn.commit()
+assert wb.merge_osm_paths(conn) == 1
+edge = [json.loads(r["light"]) for r in conn.execute("SELECT light FROM store WHERE name='Edge Walk'")]
+assert len(edge) == 1 and abs(edge[0]["distance_km"] - 1.4) < 0.01 and edge[0]["recipe"]["bbox"][0] == -36.51 and edge[0]["recipe"]["bbox"][2] == -36.49, edge
+assert conn.execute("SELECT COUNT(*) FROM store WHERE name='Far Walk'").fetchone()[0] == 1
+
+# A square the server cannot answer is split in four and tried again; a hopeless one is reported, not hidden
+tries = []
+def pickyop(q, lane=None):
+    m = _re.search(r"bbox:([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)", q); tries.append(float(m.group(3)) - float(m.group(1)))
+    if float(m.group(3)) - float(m.group(1)) > 0.3: raise RuntimeError("server too busy")
+    return {"elements": []}
+wb.overpass = pickyop
+assert wb._osm_cell(conn, -37.0, 174.5, -36.5, 175.0) == 0 and tries == [0.5, 0.25, 0.25, 0.25, 0.25], tries
+wb.overpass = lambda q, lane=None: (_ for _ in ()).throw(RuntimeError("down"))
+wb.seed_cells = lambda: [(-37.0, 174.5)]; conn.execute("DELETE FROM seed_cells"); conn.commit()
+wb.seed_run_one(conn, "store_osm")
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["store_osm"]["status"] == "error" and "down" in ov["store_osm"]["msg"], ov["store_osm"]
+wb.overpass = fake_overpass
+
+# Raw OSM extract: streamed to the data folder, and a stopped download carries on instead of starting again
+class Stream:
+    def __init__(self, body, code=200, total=None): self.body, self.status_code = body, code; self.headers = {"Content-Length": str(len(body))}
+    def iter_content(self, n):
+        for i in range(0, len(self.body), 4): yield self.body[i:i + 4]
+BLOB = b"0123456789abcdefghij" * 3
+sent = []
+def blob_get(url, headers=None, **kw):
+    sent.append(dict(headers or {}))
+    rng = (headers or {}).get("Range")
+    if rng:
+        start = int(rng.split("=")[1].rstrip("-")); return Stream(BLOB[start:], 206)
+    return Stream(BLOB)
+tmp = tempfile.mkdtemp(); wb.DATA_DIR = tmp; wb.OSM_EXTRACT_URL = "https://download.example/nz/new-zealand-latest.osm.pbf"
+wb.requests.get = blob_get
+wb.seed_run_one(conn, "osm_extract")
+dest = os.path.join(tmp, "osm", "new-zealand-latest.osm.pbf")
+assert open(dest, "rb").read() == BLOB and not os.path.exists(dest + ".part") and "Range" not in sent[0]
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["osm_extract"]["status"] == "done" and ov["osm_extract"]["done"] == len(BLOB), ov["osm_extract"]
+os.remove(dest); open(dest + ".part", "wb").write(BLOB[:24]); sent.clear()
+wb.seed_run_one(conn, "osm_extract")
+assert open(dest, "rb").read() == BLOB and sent[0]["Range"] == "bytes=24-"                                   # resumed from byte 24
+wb.seed_run_one(conn, "osm_extract")
+assert "Already saved" in c.get("/api/seed").get_json()["items"][0]["msg"]
+wb.requests.get = lambda url, **kw: Stream(b"", 404)
+os.remove(dest); wb.seed_run_one(conn, "osm_extract")
+assert c.get("/api/seed").get_json()["items"][0]["status"] == "error"
+wb.requests.get = fake_get
+
+# The two self-building services report their state; once Overpass answers, Walkbox asks it first
+wb.requests.get = lambda url, **kw: Resp({}, 200) if url.endswith("/status") else fake_get(url, **kw)
+ov = {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}
+assert ov["valhalla"]["status"] == "done" and "Ready" in ov["valhalla"]["msg"]
+wb.requests.get = lambda url, **kw: (_ for _ in ()).throw(wb.requests.ConnectionError("refused"))
+assert {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}["valhalla"]["status"] == "running"
+wb.OVERPASS_LOCAL_URL = "http://walkbox-overpass/api/interpreter"; wb._local_ok["ts"] = 0
+assert {i["id"]: i for i in c.get("/api/seed").get_json()["items"]}["overpass_db"]["status"] == "running"   # still importing
+wb.requests.get = lambda url, **kw: Resp({}, 200)
+wb._local_ok["ts"] = 0
+posted = []
+wb.requests.post = lambda url, **kw: (posted.append(url), PResp({"elements": []}))[1]
+saved_urls2 = wb.OVERPASS_URLS; wb.OVERPASS_URLS = ["https://public.example/api"]
+real_overpass("q"); assert posted == ["http://walkbox-overpass/api/interpreter"], posted
+wb.OVERPASS_LOCAL_URL = ""; wb.OVERPASS_URLS = saved_urls2; wb.requests.get = fake_get; wb._arcgis_post = real_arcgis_post
+wb.requests.post = saved_post
+
+# First start queues everything; a restart carries on what was running and never queues again
+c2 = wb.raw_db(); c2.execute("DELETE FROM seed_state"); c2.commit()
+wb.seed_startup(c2)
+assert [wb.seed_status(c2, i) for i in wb.SEED_RUN_ORDER] == ["queued"] * 4
+wb.seed_set(c2, "store_nz", "running", msg="x"); wb.seed_set(c2, "store_doc", "done"); wb.seed_set(c2, "store_osm", "cancelled"); wb.seed_set(c2, "osm_extract", "error")
+wb.seed_startup(c2)
+assert [wb.seed_status(c2, i) for i in wb.SEED_RUN_ORDER] == ["done", "queued", "cancelled", "error"]
+c2.execute("DELETE FROM seed_state"); c2.commit(); os.environ["SEED_AUTOSTART"] = "0"; wb.seed_startup(c2)
+assert c2.execute("SELECT COUNT(*) FROM seed_state").fetchone()[0] == 0                                    # switched off by SEED_AUTOSTART=0
+os.environ["SEED_AUTOSTART"] = "1"
+assert b"dataPanel" in c.get("/").data and b"tabData" in c.get("/").data and b"Download selected" in c.get("/").data
+print("SEED TESTS PASSED")
