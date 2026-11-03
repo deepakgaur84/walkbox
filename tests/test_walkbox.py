@@ -1169,4 +1169,13 @@ assert len([1 for u, p in get_log if "commons.wikimedia.org" in u]) == n_before
 wb._cache[777777] = {"osm_id": 777777, "name": "Open only", "chains": [[(-36.79, 174.77), (-36.8, 174.77)]]}
 assert c.get("/api/walks/777777/photos").get_json()["photos"], "photos for a walk that is not in the box"
 assert c.get("/api/walks/888888/photos").status_code == 404
+
+# the street layer: OpenStreetMap by default, CARTO only when a key is configured
+os.environ.pop("CARTO_KEY", None)
+page = c.get("/").data
+assert b"const CARTO_KEY = \"\";" in page and b"tile.openstreetmap.org" in page
+os.environ["CARTO_KEY"] = 'ab"c</script>'
+page = c.get("/").data
+assert b'CARTO_KEY = "ab\\"c\\u003c/script\\u003e"' in page and b"</script>\";" not in page      # escaped: an odd key cannot break out of the script
+os.environ.pop("CARTO_KEY", None)
 print("SEED TESTS PASSED")

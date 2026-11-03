@@ -412,6 +412,7 @@
 <script>
 const MAX_SPAN = {{ max_span }};
 const ROUTING = {{ 'true' if routing_enabled else 'false' }};
+const CARTO_KEY = {{ carto_key|tojson }};     // optional: a free CARTO key gives the cleaner street map
 let mode = 'find';
 let results = [];
 let origin = null;   // the place last searched with Go: walks that end there are turned round to start there
@@ -419,7 +420,9 @@ const selected = new Set();
 const AUCKLAND_CBD = [-36.8485, 174.7633];
 const map = L.map('map', {zoomControl: false}).setView(AUCKLAND_CBD, 13);
 const BASES = {
-  streets: L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap contributors © CARTO'}),
+  streets: CARTO_KEY
+    ? L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=' + encodeURIComponent(CARTO_KEY), {maxZoom: 20, attribution: '© OpenStreetMap contributors © CARTO'})
+    : L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© OpenStreetMap contributors'}),
   sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom: 19, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'}),
   topo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom: 17, subdomains: 'abc', attribution: '© OpenStreetMap contributors, SRTM | © OpenTopoMap (CC-BY-SA)'}),
 };

@@ -1055,7 +1055,8 @@ def public(walk, added=False, preview=True):
 
 @app.route("/")
 def index():
-    return render_template("index.html", max_span=MAX_SPAN_DEG, routing_enabled=bool(VALHALLA_URL))
+    return render_template("index.html", max_span=MAX_SPAN_DEG, routing_enabled=bool(VALHALLA_URL),
+                           carto_key=os.environ.get("CARTO_KEY", "").strip())
 
 
 @app.route("/healthz")

@@ -19,6 +19,9 @@ services:
       OVERPASS_LOCAL_URL: http://walkbox-overpass/api/interpreter
       # First start queues the one-off NZ downloads (set to "0" to start them yourself from the Data tab).
       SEED_AUTOSTART: "1"
+      # Optional: a free key from carto.com/basemaps/apikey gives the cleaner CARTO street map (OpenStreetMap tiles are used when blank).
+      # Set CARTO_KEY in the stack's environment variables in Dockhand; do not write the key into this file.
+      CARTO_KEY: ${CARTO_KEY:-}
     # Public DNS so the container can reach the OpenStreetMap servers.
     dns:
       - 1.1.1.1

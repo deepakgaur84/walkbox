@@ -168,7 +168,7 @@ Commons when there is one, otherwise a coloured tile) with a ♡ to save to your
 nearby dots merge into "N trails" and tapping one zooms in. The chips above the map (Difficulty, Length, Elevation, Features, Sources)
 narrow the list already on screen; **Sources** picks what the next search fetches. Tapping a walk opens its page in the panel: photos,
 length, climb, estimated time, facts, description, elevation, weather and nearby places, with **Download GPX** pinned at the bottom.
-The **Map layers** box switches between streets (CARTO), satellite (Esri) and topographic (OpenTopoMap).
+The **Map layers** box switches between streets (OpenStreetMap), satellite (Esri) and topographic (OpenTopoMap).
 
 ## At a glance
 
@@ -226,6 +226,7 @@ start them yourself). Create the `/volume1/docker/walkbox/overpass` folder befor
 | ROUTE_TYPES | hiking\|foot\|walking | OSM route types to include. |
 | OVERPASS_URLS | overpass-api.de, overpass.kumi.systems | Comma-separated Overpass servers, tried in order. |
 | OVERPASS_LOCAL_URL | (blank) | Your own Overpass server; asked first once it answers. |
+| CARTO_KEY | (blank) | Optional free key from carto.com/basemaps/apikey. With it the street layer is the CARTO Voyager map; without it, OpenStreetMap tiles. The key is visible in the page, so restrict it to your Walkbox address on the CARTO dashboard. |
 | SEED_AUTOSTART | 1 | Queue the NZ downloads on the very first start. |
 | OSM_EXTRACT_URL | Geofabrik NZ .osm.pbf | File fetched by "Raw OSM extract". |
 | SEED_CELL_DEG | 0.5 | Size of each square when storing OpenStreetMap walks. |
