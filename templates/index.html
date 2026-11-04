@@ -154,7 +154,7 @@
   #openSide { position:absolute; left:12px; top:12px; z-index:1001; display:none; }
   #side.collapsed ~ #openSide, body.sidehidden #openSide { display:flex; }
   .rbtn { width:46px; height:46px; border-radius:50%; background:#fff; border:0; box-shadow:0 2px 8px rgba(0,0,0,.28); font-size:22px; line-height:1; cursor:pointer; color:#1d241c; display:flex; align-items:center; justify-content:center; padding:0; }
-  .rbtn:hover { background:#f3f6f1; } .rbtn.sm { width:36px; height:36px; font-size:16px; box-shadow:none; background:#eef1ec; }
+  .rbtn:hover { background:#f3f6f1; } .rbtn.on { background:var(--dark); color:#fff; } .rbtn.sm { width:36px; height:36px; font-size:16px; box-shadow:none; background:#eef1ec; }
   .sh { display:flex; align-items:center; justify-content:space-between; padding:16px 18px 6px; }
   .sh h2 { margin:0; font-size:21px; font-weight:600; letter-spacing:-.2px; }
   .seg { display:flex; gap:6px; padding:4px 18px 10px; }
@@ -216,6 +216,9 @@
   #layerbox .lth { display:flex; gap:6px; }
   #layerbox button { width:38px; height:38px; border-radius:9px; border:2px solid transparent; cursor:pointer; padding:0; }
   #layerbox button.on { border-color:var(--dark); }
+  #layerbox .dk { display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11px; font-weight:700; }
+  #layerbox .dk input { flex:1; min-width:0; accent-color:var(--dark); }
+  .leaflet-tile-pane { filter:brightness(var(--tb,1)) contrast(var(--tc,1)) saturate(var(--ts,1)); }
   #layerbox button[data-layer=streets] { background:linear-gradient(135deg,#f0ece3 0 45%,#fff 45% 55%,#cfe3f2 55%); }
   #layerbox button[data-layer=sat] { background:linear-gradient(135deg,#2b4a2f,#1d3a4d 60%,#5b6b3a); }
   #layerbox button[data-layer=topo] { background:repeating-radial-gradient(circle at 60% 55%,#e4d9b8 0 4px,#cdbf94 4px 6px); }
@@ -333,7 +336,9 @@
           <button data-layer="sat" title="Satellite"></button>
           <button data-layer="topo" title="Topographic"></button>
         </div>
+        <label class="dk">Darken <input type="range" id="darkSlider" min="0" max="100" step="5" value="0" title="Darken the map"></label>
       </div>
+      <button class="rbtn" id="darkBtn" title="Darken map">◐</button>
       <button class="rbtn" id="zin" title="Zoom in">+</button>
       <button class="rbtn" id="zout" title="Zoom out">−</button>
       <button class="rbtn" id="locBtn" title="My location">➤</button>
@@ -471,6 +476,19 @@ document.querySelectorAll('#layerbox button').forEach(b => {
     try { localStorage.setItem('walkbox.base', baseKey); } catch (e) { /* not important */ }
   };
 });
+
+// ---- map darkening (tile pane only, so pins and routes stay crisp) ----
+let darkLvl = 0;
+try { const d = parseInt(localStorage.getItem('walkbox.dark'), 10); if (d >= 0 && d <= 100) darkLvl = d; } catch (e) { /* default */ }
+function setDark(v, save) {
+  darkLvl = Math.max(0, Math.min(100, v)); const f = darkLvl / 100, st = document.documentElement.style;
+  st.setProperty('--tb', (1 - 0.5 * f).toFixed(3)); st.setProperty('--tc', (1 + 0.35 * f).toFixed(3)); st.setProperty('--ts', (1 + 0.3 * f).toFixed(3));
+  $('darkSlider').value = darkLvl; $('darkBtn').classList.toggle('on', darkLvl > 0);
+  if (save) try { localStorage.setItem('walkbox.dark', String(darkLvl)); } catch (e) { /* not important */ }
+}
+$('darkSlider').oninput = e => setDark(+e.target.value, true);
+$('darkBtn').onclick = () => setDark(darkLvl >= 100 ? 0 : (Math.floor(darkLvl / 25) + 1) * 25, true);
+setDark(darkLvl, false);
 
 // ---- filter chips (they narrow the list that is already on screen) ----
 function diffBucket(r) {
