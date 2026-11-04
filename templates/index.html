@@ -161,7 +161,7 @@
   .seg button { border:1px solid var(--line); background:#fff; border-radius:20px; padding:5px 13px; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer; }
   .seg button.active { background:var(--dark); border-color:var(--dark); color:#fff; }
   #lv { display:flex; flex-direction:column; min-height:0; flex:1; }
-  body.detail #lv, body.detail .sh, body.detail .seg { display:none; }
+  body.detail #lv, body.detail .sh { display:none; }
   #side { display:flex; flex-direction:column; }
   .tools { padding:4px 18px 10px; border-bottom:0; gap:8px; }
   .sbox { display:flex; align-items:center; gap:6px; flex:1 1 100%; background:#f1f3ef; border-radius:24px; padding:3px 4px 3px 14px; }
@@ -273,6 +273,28 @@
   #dFoot button { width:100%; background:var(--dark); color:#fff; border:0; border-radius:28px; padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
   #dMore .wnow { font-size:15px; font-weight:600; }
   #info .sub { color:var(--mute); font-size:12px; }
+  /* ===== v3: AllTrails-style header bar, floating search button, pill pins ===== */
+  :root { --hdr:56px; }
+  #topbar { position:absolute; left:0; right:0; top:0; height:var(--hdr); z-index:1100; background:#fff; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:28px; padding:0 18px; box-shadow:0 1px 6px rgba(0,0,0,.08); }
+  #topbar .logo { font-size:20px; font-weight:700; color:var(--brand); letter-spacing:-.3px; white-space:nowrap; }
+  #topbar .lg { font-size:17px; }
+  #topbar .seg { padding:0; gap:4px; }
+  #topbar .seg button { border:0; background:none; border-radius:0; padding:17px 12px 15px; font-size:15px; color:var(--mute); border-bottom:3px solid transparent; }
+  #topbar .seg button:hover { color:var(--ink); }
+  #topbar .seg button.active { background:none; color:var(--ink); border-bottom-color:var(--brand); }
+  main { top:var(--hdr); }
+  #side { top:12px; }
+  #searchBtn { position:absolute; left:50%; bottom:28px; transform:translateX(-50%); z-index:900; width:auto; padding:12px 22px; border-radius:26px; background:#fff; color:var(--ink); border:1px solid #d8ddd5; box-shadow:0 2px 10px rgba(0,0,0,.3); font-size:14px; font-weight:700; cursor:pointer; }
+  #searchBtn:hover { background:#f3f6f1; } #searchBtn:disabled { opacity:.7; cursor:progress; }
+  #countRow { padding:6px 18px 8px; } #countTxt { font-size:16px; font-weight:700; }
+  .pinl.pill span { background:#fff; border:1px solid #cfd5cb; border-radius:14px; padding:3px 9px; font-size:12px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.3); }
+  .pinl.pill:hover span, .pinl.pill.sel span { background:var(--dark); color:#fff; border-color:var(--dark); }
+  .clus { padding:4px 10px; border-radius:15px; }
+  @media (max-width:800px) {
+    #topbar { gap:10px; padding:0 8px; } #topbar .logo { font-size:0; } #topbar .lg { font-size:18px; }
+    #topbar .seg button { padding:17px 8px 15px; font-size:14px; }
+    #searchBtn { bottom:calc(52vh + 20px); }
+  }
   @media (max-width:800px) {
     #side { left:8px; right:8px; top:auto; bottom:8px; width:auto; height:52vh; }
     #chipbar { left:8px; right:62px; top:8px; flex-wrap:nowrap; overflow-x:auto; }
@@ -284,6 +306,14 @@
 </style>
 </head>
 <body>
+<header id="topbar">
+  <div class="logo"><span class="lg">▲</span> Walkbox</div>
+  <nav class="seg">
+    <button id="tabFind" class="active">Explore</button>
+    <button id="tabBox">My walk box</button>
+    <button id="tabData">Data</button>
+  </nav>
+</header>
 <main>
   <div id="mapwrap">
     <div id="map"></div>
@@ -330,7 +360,7 @@
     </div>
     <div id="mapctl">
       <div id="layerbox">
-        <div class="lt">Map layers</div>
+        <div class="lt">Map layers ›</div>
         <div class="lth">
           <button data-layer="streets" class="on" title="Streets"></button>
           <button data-layer="sat" title="Satellite"></button>
@@ -343,6 +373,7 @@
       <button class="rbtn" id="zout" title="Zoom out">−</button>
       <button class="rbtn" id="locBtn" title="My location">➤</button>
     </div>
+    <button id="searchBtn" class="b">Find walks in this map view</button>
     <div id="livebar"></div>
     <div id="legend"></div>
     <div id="toast"></div>
@@ -353,15 +384,9 @@
   </div>
   <aside id="side">
     <div class="sh"><h2 id="sideTitle">Explore trails</h2><button id="collapseBtn" class="rbtn sm" title="Hide the list">⌃</button></div>
-    <div class="seg">
-      <button id="tabFind" class="active">Explore</button>
-      <button id="tabBox">My walk box</button>
-      <button id="tabData">Data</button>
-    </div>
     <div id="lv">
       <div id="findTools" class="tools">
-        <div class="sbox"><span class="mag">⌕</span><input type="text" id="place" placeholder="Search walks by name, or go to a place"><button id="goBtn" title="Move the map to this place">Go to place</button></div>
-        <button class="b" id="searchBtn">Find walks in this map view</button>
+        <div class="sbox"><span class="mag">⌕</span><input type="text" id="place" placeholder="Search walks or a place"><button id="goBtn" title="Move the map to this place">Go to place</button></div>
       </div>
       <div id="boxTools" class="tools" style="display:none">
         <div class="sbox"><span class="mag">⌕</span><input type="text" id="q" placeholder="Search your walks (name, place, operator…)"></div>
@@ -596,9 +621,9 @@ function setMode(m) {
   $('countRow').style.display = m === 'data' ? 'none' : ''; $('sortSel').style.display = m === 'box' ? 'none' : '';
   $('dataPanel').style.display = m === 'data' ? '' : 'none';
   $('status').style.display = $('list').style.display = m === 'data' ? 'none' : '';
-  if (m === 'data') { ['findTools', 'boxTools', 'findActions'].forEach(i => $(i).style.display = 'none'); selected.clear(); layerGroup.clearLayers(); results = []; render(); startDataPoll(); return; }
+  if (m === 'data') { ['findTools', 'boxTools', 'findActions', 'searchBtn'].forEach(i => $(i).style.display = 'none'); selected.clear(); layerGroup.clearLayers(); results = []; render(); startDataPoll(); return; }
   stopDataPoll();
-  $('findTools').style.display = m === 'find' ? '' : 'none';
+  $('findTools').style.display = m === 'find' ? '' : 'none'; $('searchBtn').style.display = m === 'find' ? '' : 'none';
   $('findActions').style.display = m === 'find' && results.length ? '' : 'none';
   $('boxTools').style.display = m === 'box' ? '' : 'none';
   selected.clear(); layerGroup.clearLayers();
@@ -1804,14 +1829,15 @@ function drawPins() {
   });
   groups.forEach(list => {
     if (list.length === 1) {
-      const r = list[0], isSel = sel && sel.r.osm_id === r.osm_id, label = z >= 13 && r.distance_km != null;
-      const html = '<div class="pinl"><i class="pin1' + (isSel ? ' sel' : '') + '"></i>' + (label ? '<span>' + (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km</span>' : '') + '</div>';
-      const mk = L.marker([r.lat, r.lon], {icon: L.divIcon({className: '', html, iconSize: [label ? 74 : 16, 16], iconAnchor: [8, 8]}), riseOnHover: true});
+      const r = list[0], isSel = sel && sel.r.osm_id === r.osm_id;
+      const lab = r.distance_km != null, html = lab ? '<div class="pinl pill' + (isSel ? ' sel' : '') + '"><span>' + (r.approx ? '~' : '') + r.distance_km.toFixed(1) + ' km</span></div>'
+        : '<div class="pinl"><i class="pin1' + (isSel ? ' sel' : '') + '"></i></div>';
+      const mk = L.marker([r.lat, r.lon], {icon: L.divIcon({className: '', html, iconSize: lab ? [64, 24] : [16, 16], iconAnchor: lab ? [32, 12] : [8, 8]}), riseOnHover: true});
       mk.on('click', () => openWalk(r.osm_id));
       mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); });
       mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); });
       mk.addTo(pinLayer);
-      setTimeout(() => { const e = mk.getElement && mk.getElement(); if (e) pinEls[r.osm_id] = e.querySelector('.pin1'); }, 0);
+      setTimeout(() => { const e = mk.getElement && mk.getElement(); if (e) pinEls[r.osm_id] = e.querySelector('.pin1, .pinl'); }, 0);
     } else {
       const lat = list.reduce((a, r) => a + r.lat, 0) / list.length, lon = list.reduce((a, r) => a + r.lon, 0) / list.length;
       const mk = L.marker([lat, lon], {icon: L.divIcon({className: '', html: '<div class="clus">' + list.length + ' trails</div>', iconSize: [70, 24], iconAnchor: [35, 12]})});
