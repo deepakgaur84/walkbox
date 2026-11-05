@@ -2578,7 +2578,7 @@ def _scan_progress(phase, count):
     if phase == "waysdone":
         return 36, "Found %d walking ways. Placing them on the map…" % count
     if phase == "nodes":
-        return min(55, 36 + int(19 * count / 45000000.0)), "Placing them on the map and noting places (%d million points looked at)…" % (count // 1000000)
+        return 36 + int(22 * (1 - math.exp(-count / 60000000.0))), "Placing them on the map and noting places (%d million points looked at)…" % (count // 1000000)
     if phase == "nodesdone":
         return 58, "Placed %d points. Finishing the read…" % count
     if phase == "poisdone":
