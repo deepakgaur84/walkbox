@@ -159,6 +159,11 @@ CREATE TABLE IF NOT EXISTS store (
     s REAL, w REAL, n REAL, e REAL, light TEXT NOT NULL, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS store_src ON store(source, s, n);
+CREATE TABLE IF NOT EXISTS poi (
+    id INTEGER PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL,
+    name TEXT, hours TEXT, website TEXT
+);
+CREATE INDEX IF NOT EXISTS poi_lat ON poi(lat);
 CREATE TABLE IF NOT EXISTS seed_state (
     item TEXT PRIMARY KEY, status TEXT NOT NULL, done REAL, total REAL, msg TEXT, finished REAL, updated REAL
 );
@@ -1543,22 +1548,23 @@ def along_and_off(lat, lon, chain, cum):
     return best_along, best_off
 
 
-def fetch_places(chain):
-    """Food, water, toilets, rest spots and viewpoints near a route, from OpenStreetMap."""
-    ch = simplify(chain, 400)
-    pad = 0.0025
-    s_, n_ = min(p[0] for p in ch) - pad, max(p[0] for p in ch) + pad
-    w_, e_ = min(p[1] for p in ch) - pad, max(p[1] for p in ch) + pad
-    bb = "(%f,%f,%f,%f)" % (s_, w_, n_, e_)
+def places_local_ok(s_, w_, n_, e_):
+    """True when the places read from the NZ file are saved and the walk lies inside New Zealand."""
+    if not (NZ_BOX[0] <= s_ and n_ <= NZ_BOX[1] and NZ_BOX[2] <= w_ and e_ <= NZ_BOX[3]):
+        return False
+    try:
+        if seed_status(db(), "store_osm") != "done":
+            return False
+        return db().execute("SELECT 1 FROM poi LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _places_overpass(bb):
     q = ("[out:json][timeout:25];("
          'nwr["amenity"~"^(cafe|restaurant|fast_food|food_court|ice_cream|pub|bar|drinking_water|toilets|shelter|bench)$"]%s;'
          'nwr["leisure"="picnic_table"]%s;nwr["tourism"~"^(picnic_site|viewpoint)$"]%s;'
          'nwr["shop"~"^(bakery|convenience|supermarket)$"]%s;);out tags center 1500;' % (bb, bb, bb, bb))
-    cum = [0.0]
-    for i in range(1, len(ch)):
-        cum.append(cum[-1] + haversine_m(ch[i - 1], ch[i]))
-    total_km = cum[-1] / 1000.0
-    out, seen = [], set()
     for el in overpass(q).get("elements", []):
         tags = el.get("tags", {})
         kind, label = classify_place(tags)
@@ -1566,18 +1572,42 @@ def fetch_places(chain):
             continue
         lat = el.get("lat") if el.get("lat") is not None else (el.get("center") or {}).get("lat")
         lon = el.get("lon") if el.get("lon") is not None else (el.get("center") or {}).get("lon")
+        yield ((el.get("type"), el.get("id")), kind, label, tags.get("name"), lat, lon,
+               tags.get("opening_hours"), tags.get("website") or tags.get("contact:website"))
+
+
+def _places_local(s_, w_, n_, e_):
+    for r in db().execute("SELECT id, kind, label, name, lat, lon, hours, website FROM poi "
+                          "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", (s_, n_, w_, e_)):
+        yield (("poi", r["id"]), r["kind"], r["label"], r["name"], r["lat"], r["lon"], r["hours"], r["website"])
+
+
+def fetch_places(chain):
+    """Food, water, toilets, rest spots and viewpoints near a route: from Walkbox's own copy of the NZ file when it
+    has been read, otherwise (outside NZ, or before the store is built) from the live OpenStreetMap servers."""
+    ch = simplify(chain, 400)
+    pad = 0.0025
+    s_, n_ = min(p[0] for p in ch) - pad, max(p[0] for p in ch) + pad
+    w_, e_ = min(p[1] for p in ch) - pad, max(p[1] for p in ch) + pad
+    cum = [0.0]
+    for i in range(1, len(ch)):
+        cum.append(cum[-1] + haversine_m(ch[i - 1], ch[i]))
+    total_km = cum[-1] / 1000.0
+    local = places_local_ok(s_, w_, n_, e_)
+    cands = _places_local(s_, w_, n_, e_) if local else _places_overpass("(%f,%f,%f,%f)" % (s_, w_, n_, e_))
+    out, seen = [], set()
+    for key, kind, label, name, lat, lon, hours, website in cands:
         if lat is None or lon is None:
             continue
         along, off = along_and_off(lat, lon, ch, cum)
         if off > PLACE_KINDS[kind][2]:
             continue
-        key = (el.get("type"), el.get("id"))
         if key in seen:
             continue
         seen.add(key)
-        out.append({"kind": kind, "label": label, "name": tags.get("name"), "lat": round(lat, 6), "lon": round(lon, 6),
+        out.append({"kind": kind, "label": label, "name": name, "lat": round(lat, 6), "lon": round(lon, 6),
                     "off_m": int(round(off)), "along_km": round(along / 1000.0, 2),
-                    "hours": tags.get("opening_hours"), "website": tags.get("website") or tags.get("contact:website")})
+                    "hours": hours, "website": website})
     out.sort(key=lambda x: x["along_km"])
     per_kind = {}
     trimmed = []
@@ -2314,7 +2344,7 @@ SEED_LABELS = {
     "osm_extract": ("Raw OSM extract", "The whole-NZ OpenStreetMap file (about 400 MB), saved to the data folder. Fetched again every month."),
     "valhalla": ("Valhalla routing tiles", "Built inside the walkbox-valhalla container (about 1–2 GB). Walkbox shows its progress."),
     "overpass_db": ("Self-hosted Overpass database", "Optional: only shown when OVERPASS_LOCAL_URL points at your own Overpass container."),
-    "store_osm": ("Walkbox's own store: OpenStreetMap walks", "Routes and named paths for all NZ, built from the extract above and kept in Walkbox's database (about 100 MB). Rebuilt every month."),
+    "store_osm": ("Walkbox's own store: OpenStreetMap walks", "Routes and named paths for all NZ, plus cafés, toilets, water and other places along them, built from the extract above and kept in Walkbox's database (about 100 MB). Rebuilt every month."),
     "store_doc": ("DOC walking experiences", "Every DOC walk with its route (about 5 MB)."),
     "store_nz": ("National tracks (council and other)", "Every council and other national track with its route (about 60 MB)."),
 }
@@ -2548,9 +2578,11 @@ def _scan_progress(phase, count):
     if phase == "waysdone":
         return 36, "Found %d walking ways. Placing them on the map…" % count
     if phase == "nodes":
-        return min(55, 36 + int(19 * count / 45000000.0)), "Placing them on the map (%d million points looked at)…" % (count // 1000000)
+        return min(55, 36 + int(19 * count / 45000000.0)), "Placing them on the map and noting places (%d million points looked at)…" % (count // 1000000)
     if phase == "nodesdone":
         return 58, "Placed %d points. Finishing the read…" % count
+    if phase == "poisdone":
+        return 59, "Found %d places (cafés, toilets, water…). Finishing the read…" % count
     return 60, "Read the file. Joining the ways into walks…"
 
 
@@ -2617,6 +2649,9 @@ def store_scan(conn, scan):
     ways = scan["ways"]
     conn.execute("DROP TABLE IF EXISTS store_osm_new")
     conn.execute(OSM_NEW_TABLE)
+    conn.execute("DROP TABLE IF EXISTS poi_new")
+    conn.execute("CREATE TABLE poi_new (id INTEGER PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, kind TEXT NOT NULL, "
+                 "label TEXT NOT NULL, name TEXT, hours TEXT, website TEXT)")
 
     def put(light, bbox, detail):
         conn.execute("INSERT OR REPLACE INTO store_osm_new (osm_id, source, name, s, w, n, e, light, detail) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -2676,9 +2711,29 @@ def store_scan(conn, scan):
         if n % 200 == 0:
             conn.commit()
 
-    # 3. swap: the old OpenStreetMap rows stay in place and searchable until this moment
+    # 3. places along the way: cafes, toilets, water, benches and so on
+    pois, rows = 0, []
+    for lat, lon, tags in scan.get("pois") or []:
+        kind, label = classify_place(tags)
+        if not kind:
+            continue
+        rows.append((lat, lon, kind, label, tags.get("name"), tags.get("opening_hours"),
+                     tags.get("website") or tags.get("contact:website")))
+        if len(rows) >= 5000:
+            conn.executemany("INSERT INTO poi_new (lat, lon, kind, label, name, hours, website) VALUES (?,?,?,?,?,?,?)", rows)
+            pois += len(rows)
+            rows = []
+    if rows:
+        conn.executemany("INSERT INTO poi_new (lat, lon, kind, label, name, hours, website) VALUES (?,?,?,?,?,?,?)", rows)
+        pois += len(rows)
+
+    # 4. swap: the old OpenStreetMap rows stay in place and searchable until this moment
     seed_check(conn, "store_osm", done=99, total=100, msg="Saving…")
     conn.commit()
+    conn.execute("DELETE FROM poi")
+    conn.execute("INSERT INTO poi (lat, lon, kind, label, name, hours, website) "
+                 "SELECT lat, lon, kind, label, name, hours, website FROM poi_new")
+    conn.execute("DROP TABLE poi_new")
     conn.execute("DELETE FROM store WHERE source IN ('osm-route','osm-path')")
     conn.execute("INSERT INTO store (osm_id, source, name, s, w, n, e, light, detail) "
                  "SELECT osm_id, source, name, s, w, n, e, light, detail FROM store_osm_new")
@@ -2686,7 +2741,7 @@ def store_scan(conn, scan):
     conn.execute("DELETE FROM seed_cells WHERE item='store_osm'")                  # everything in NZ is covered now
     conn.executemany("INSERT OR IGNORE INTO seed_cells (item, cell) VALUES ('store_osm', ?)", [(cell_id(s, w),) for s, w in seed_cells()])
     conn.commit()
-    return routes, paths
+    return routes, paths, pois
 
 
 def seed_osm(conn):
@@ -2696,15 +2751,16 @@ def seed_osm(conn):
     seed_check(conn, "store_osm", 0, 100, "Opening the OSM file…")
     scan = run_scan(conn, path)
     try:
-        routes, paths = store_scan(conn, scan)
+        routes, paths, pois = store_scan(conn, scan)
     except BaseException:
         conn.rollback()
         conn.execute("DROP TABLE IF EXISTS store_osm_new")
+        conn.execute("DROP TABLE IF EXISTS poi_new")
         conn.commit()
         raise
     seed_set(conn, "store_osm", "done", 100, 100,
-             "%d OpenStreetMap walks stored (%d routes, %d named paths) from a file %d days old"
-             % (routes + paths, routes, paths, int(extract_age_days() or 0)))
+             "%d OpenStreetMap walks stored (%d routes, %d named paths) and %d places (cafés, toilets, water…) from a file %d days old"
+             % (routes + paths, routes, paths, pois, int(extract_age_days() or 0)))
 
 
 def seed_extract(conn):

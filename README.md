@@ -87,7 +87,8 @@ When a walk is open, a **Weather & nearby** card appears on the map:
 - **Weather**: current conditions at the middle of the walk and a three-day outlook (temperature, rain chance, wind, UV, sunset), from the free
   [Open-Meteo](https://open-meteo.com/) service. Forecasts are cached for 10 minutes.
 - **Along the route**: cafés, restaurants and shops (☕), drinking water (💧), toilets (🚻), rest spots such as benches, picnic tables and shelters (🪑)
-  and viewpoints (👀) near the route, from OpenStreetMap. Tap the chips to show or hide each kind; tap a place in the list or on the map for details such as
+  and viewpoints (👀) near the route, from OpenStreetMap. In New Zealand they come from Walkbox's own copy of the NZ file (read when the store is built,
+  rebuilt monthly), so they appear instantly and need no live map server; outside NZ, or before the store is built, the live servers are asked instead. Tap the chips to show or hide each kind; tap a place in the list or on the map for details such as
   opening hours. Food places within about 250 m of the route are included, other places within 120 m, and benches within 60 m. OpenStreetMap
   can be out of date, so a place may have closed.
 

@@ -990,9 +990,19 @@ def make_pbf(path, extra=False):
     if extra:
         allways.append((60, {"highway": "path", "name": "Fresh Walk"}, [(-36.7, 174.7), (-36.71, 174.7), (-36.72, 174.7)]))
     nodes = {wid: [nd(la, lo) for la, lo in pts] for wid, _, pts in sorted(allways)}
+    la0, lo0 = WAYS[0][2][0]["lat"], WAYS[0][2][0]["lon"]
+    def poi_node(lat, lon, tags):                                                  # a tagged point: a cafe, toilets, a bench...
+        i = len(ids) + 1; ids[("poi", i)] = i
+        wr.add_node(_osmium.osm.mutable.Node(id=i, location=(lon, lat), tags=tags))
+    poi_node(la0 + 0.0003, lo0, {"amenity": "cafe", "name": "Beach Cafe", "opening_hours": "Mo-Su 07:00-16:00"})
+    poi_node(la0, lo0 + 0.0003, {"amenity": "toilets"})
+    poi_node(la0 + 0.05, lo0, {"amenity": "bench"})                                # far from any walk
+    poi_node(la0, lo0 + 0.0002, {"amenity": "parking", "name": "Not a wanted place"})
+    house = [nd(la0 - 0.0003, lo0 + dl) for dl in (0.0, 0.0001, 0.0002)]           # a cafe drawn as a building
     # a point that exists on no node: outside the extract
     for wid, tags, pts in sorted(allways):
         wr.add_way(_osmium.osm.mutable.Way(id=wid, nodes=nodes[wid] + ([987654321] if wid == 51 else []), tags=tags))
+    wr.add_way(_osmium.osm.mutable.Way(id=9000000, nodes=house + [house[0]], tags={"amenity": "cafe", "name": "Beach House"}))
     for rid in sorted(REL_MEMBERS):
         wr.add_relation(_osmium.osm.mutable.Relation(id=rid, members=[("w", rid * 10 + k, "") for k in range(len(REL_MEMBERS[rid]))],
                                                       tags=dict(REL_TAGS[rid], type="route")))
@@ -1136,6 +1146,21 @@ assert not wb.refresh_due(conn)                                                 
 conn.execute("UPDATE seed_state SET updated=? WHERE item='osm_refresh'", (time.time() - 2 * DAY,)); conn.commit()
 assert wb.refresh_due(conn)
 assert "Fresh Walk" in {r["name"] for r in conn.execute("SELECT name FROM store WHERE source='osm-path'")}   # the old walks were never lost
+# places read from the same file: cafes, toilets, benches... and nothing else
+pois = {(r["kind"], r["label"], r["name"]) for r in conn.execute("SELECT kind, label, name FROM poi")}
+assert ("food", "Café", "Beach Cafe") in pois and ("food", "Café", "Beach House") in pois and ("toilets", "Toilets", None) in pois, pois
+assert ("rest", "Bench", None) in pois and not any(n == "Not a wanted place" for _, _, n in pois)
+assert conn.execute("SELECT hours FROM poi WHERE name='Beach Cafe'").fetchone()[0] == "Mo-Su 07:00-16:00"
+_ov = wb.overpass
+def _no_overpass(*a, **k): raise AssertionError("the live map server must not be asked when the places are saved")
+wb.overpass = _no_overpass
+with wb.app.test_request_context():
+    chain = [(p["lat"], p["lon"]) for p in WAYS[0][2]]
+    got = wb.fetch_places(chain)
+names = {x["name"] for x in got["places"] if x["name"]}
+assert {"Beach Cafe", "Beach House"} <= names and got["counts"]["toilets"] == 1, got["counts"]
+assert got["counts"]["rest"] == 0, "the far bench is more than 60 m from the walk"
+wb.overpass = _ov
 wb.requests.get = fake_get
 
 # The two self-building services report their state; once Overpass answers, Walkbox asks it first
