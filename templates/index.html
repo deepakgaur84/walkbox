@@ -598,7 +598,7 @@ const FIND_KEY = 'walkbox.find.v1', FIND_MAX_AGE = 6 * 3600 * 1000;
 function persistFind() {                    // the light list only: routes are fetched again (instantly, from the server cache) when opened
   try {
     if (!findState || !findState.results.length) return;
-    const light = findState.results.map(r => { const c = Object.assign({}, r); delete c.line; delete c._originStamp; delete c.reversed; delete c.autoSwapped; delete c.est; return c; });
+    const light = findState.results.map(r => { const c = Object.assign({}, r); if (!c.preview) delete c.line; delete c._originStamp; delete c.reversed; delete c.autoSwapped; delete c.est; return c; });
     localStorage.setItem(FIND_KEY, JSON.stringify({t: Date.now(), state: Object.assign({}, findState, {results: light, selected: []}),
       boxes: ['srcDoc', 'srcNz', 'srcRoutes', 'srcPaths'].map(id => $(id).checked)}));
   } catch (e) { /* storage full or blocked: not important */ }
@@ -1822,11 +1822,19 @@ function makeCard(r) {
   return item;
 }
 
+const HOT_LINE = {color: '#1b5e20', weight: 8, opacity: 1};
+function lineHot(id, on) {                                  // the path of the walk under the mouse stands out
+  const l = lines[id]; if (!l) return;
+  const r = results.find(x => x.osm_id == id); if (sel && sel.r.osm_id == id) return;
+  l.setStyle(on ? HOT_LINE : {color: r && r.added ? '#3b6b2a' : '#d2691e', weight: 4, opacity: .8});
+  if (on) l.bringToFront();
+}
 let pinEls = {}, pinMk = {};
 function pinHot(id, on) {                                  // lights up the map pin of the card under the mouse
   const el = pinEls[id], keep = sel && sel.r.osm_id == id;
   if (el) el.classList.toggle('sel', on || keep);
   if (pinMk[id]) pinMk[id].setZIndexOffset(on ? 1000 : 0);
+  lineHot(id, on);
 }
 function drawPins() {
   pinLayer.clearLayers(); pinEls = {}; pinMk = {};
@@ -1846,8 +1854,8 @@ function drawPins() {
         : '<div class="pinl"><i class="pin1' + (isSel ? ' sel' : '') + '"></i></div>';
       const mk = L.marker([r.lat, r.lon], {icon: L.divIcon({className: '', html, iconSize: lab ? [64, 24] : [16, 16], iconAnchor: lab ? [32, 12] : [8, 8]}), riseOnHover: true});
       mk.on('click', () => openWalk(r.osm_id));
-      mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); });
-      mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); });
+      mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); lineHot(r.osm_id, true); });
+      mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); lineHot(r.osm_id, false); });
       mk.addTo(pinLayer); pinMk[r.osm_id] = mk;
       setTimeout(() => { const e = mk.getElement && mk.getElement(); if (e) pinEls[r.osm_id] = e.querySelector('.pin1, .pinl'); }, 0);
     } else {
@@ -1872,7 +1880,9 @@ function render(keep) {
     list.appendChild(makeCard(r));
     if (r.line && r.line.length) {
       const pl = L.polyline(r.line, {color: r.added ? '#3b6b2a' : '#d2691e', weight: 4, opacity: .8})
-        .bindTooltip(r.name).on('click', () => openWalk(r.osm_id)).addTo(layerGroup);
+        .bindTooltip(r.name, {sticky: true}).on('click', () => openWalk(r.osm_id)).addTo(layerGroup);
+      pl.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) { el.classList.add('hot'); el.scrollIntoView({block: 'nearest'}); } lineHot(r.osm_id, true); });
+      pl.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); lineHot(r.osm_id, false); });
       lines[r.osm_id] = pl; all.push(pl);
     }
   });
@@ -1898,12 +1908,12 @@ function applyOrigin(r) {              // start the walk at the place that was s
 }
 async function openWalk(id) {          // routes are fetched only when a walk is clicked
   const r = results.find(x => x.osm_id == id); if (!r) return;
-  if (!r.line) {
+  if (!r.line || r.preview) {
     if (loadingIds.has(id)) return;
     loadingIds.add(id);
     const el = $('w' + id); if (el) el.style.opacity = .55;
     status('Loading the route for “' + r.name + '”…');
-    try { Object.assign(r, await post('/api/detail', {id})); status('Loaded “' + r.name + '”.'); }
+    try { Object.assign(r, await post('/api/detail', {id}), {preview: false}); status('Loaded “' + r.name + '”.'); }
     catch (e) { status(e.message, true); loadingIds.delete(id); if (el) el.style.opacity = ''; return; }
     loadingIds.delete(id);
     if (!results.includes(r)) return;     // the list changed while loading

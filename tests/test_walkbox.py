@@ -1256,4 +1256,16 @@ os.environ["CARTO_KEY"] = 'ab"c</script>'
 page = c.get("/").data
 assert b'CARTO_KEY = "ab\\"c\\u003c/script\\u003e"' in page and b"</script>\";" not in page      # escaped: an odd key cannot break out of the script
 os.environ.pop("CARTO_KEY", None)
+# search results carry a quick outline of their route when the store has one, so every path shows on the map
+with wb.app.test_request_context():
+    conn = wb.db()
+    wb.store_put(conn, {"osm_id": 424242, "source": "doc", "name": "Outline walk"}, (-36.8, 174.7, -36.7, 174.8),
+                 {"osm_id": 424242, "chains": [[[-36.79, 174.77], [-36.78, 174.78], [-36.77, 174.79]]]})
+    conn.commit()
+    light = {"osm_id": 424242, "source": "doc", "name": "Outline walk", "chains": None}
+    got = wb.with_previews([light, {"osm_id": 1, "source": "doc", "name": "No route", "chains": None}])
+    assert got[0]["chains"] and got[0]["_preview"] and light["chains"] is None      # a copy: the cached light is untouched
+    assert not got[1].get("chains")
+    pub = wb.public(got[0])
+    assert pub["preview"] is True and pub["line"] and wb.public(light)["preview"] is False
 print("SEED TESTS PASSED")
