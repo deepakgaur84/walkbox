@@ -154,7 +154,7 @@
   #openSide { position:absolute; left:12px; top:12px; z-index:1001; display:none; }
   #side.collapsed ~ #openSide, body.sidehidden #openSide { display:flex; }
   .rbtn { width:46px; height:46px; border-radius:50%; background:#fff; border:0; box-shadow:0 2px 8px rgba(0,0,0,.28); font-size:22px; line-height:1; cursor:pointer; color:#1d241c; display:flex; align-items:center; justify-content:center; padding:0; }
-  .rbtn:hover { background:#f3f6f1; } .rbtn.on { background:var(--dark); color:#fff; } .rbtn.sm { width:36px; height:36px; font-size:16px; box-shadow:none; background:#eef1ec; }
+  .rbtn:hover { background:#f3f6f1; } .rbtn.on { background:var(--dark); color:#fff; } #darkBtn { font-size:17px; font-weight:700; } .rbtn.sm { width:36px; height:36px; font-size:16px; box-shadow:none; background:#eef1ec; }
   .sh { display:flex; align-items:center; justify-content:space-between; padding:16px 18px 6px; }
   .sh h2 { margin:0; font-size:21px; font-weight:600; letter-spacing:-.2px; }
   .seg { display:flex; gap:6px; padding:4px 18px 10px; }
@@ -218,7 +218,8 @@
   #layerbox button.on { border-color:var(--dark); }
   #layerbox .dk { display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11px; font-weight:700; }
   #layerbox .dk input { flex:1; min-width:0; accent-color:var(--dark); }
-  .leaflet-tile-pane { filter:brightness(var(--tb,1)) contrast(var(--tc,1)) saturate(var(--ts,1)); }
+  .leaflet-tile-pane { filter:contrast(var(--tc,1)); }                  /* only used when the map has no separate label layer */
+  .leaflet-maplabels-pane { filter:brightness(var(--lb,1)) contrast(var(--lc,1)) drop-shadow(0 0 1px rgba(255,255,255,var(--lh,0))) drop-shadow(0 0 1px rgba(255,255,255,var(--lh,0))); pointer-events:none; }
   #layerbox button[data-layer=streets] { background:linear-gradient(135deg,#f0ece3 0 45%,#fff 45% 55%,#cfe3f2 55%); }
   #layerbox button[data-layer=sat] { background:linear-gradient(135deg,#2b4a2f,#1d3a4d 60%,#5b6b3a); }
   #layerbox button[data-layer=topo] { background:repeating-radial-gradient(circle at 60% 55%,#e4d9b8 0 4px,#cdbf94 4px 6px); }
@@ -289,6 +290,9 @@
   #countRow { padding:6px 18px 8px; } #countTxt { font-size:16px; font-weight:700; }
   .pinl.pill span { background:#fff; border:1px solid #cfd5cb; border-radius:14px; padding:3px 9px; font-size:12px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.3); }
   .pinl.pill:hover span, .pinl.pill.sel span { background:var(--dark); color:#fff; border-color:var(--dark); }
+  .pinl.sel .pin1 { width:22px; height:22px; background:#4a8f2f; border:3px solid #fff; box-shadow:0 0 0 2px #1d241c, 0 2px 6px rgba(0,0,0,.4); }
+  .pinl.pill span { transition:transform .12s, background .12s; } .pinl.pill.sel span { transform:scale(1.18); box-shadow:0 2px 8px rgba(0,0,0,.45); }
+  .item.hot { background:var(--brand2); box-shadow:0 0 0 6px var(--brand2); }
   .clus { padding:4px 10px; border-radius:15px; }
   @media (max-width:800px) {
     #topbar { gap:10px; padding:0 8px; } #topbar .logo { font-size:0; } #topbar .lg { font-size:18px; }
@@ -366,9 +370,9 @@
           <button data-layer="sat" title="Satellite"></button>
           <button data-layer="topo" title="Topographic"></button>
         </div>
-        <label class="dk">Darken <input type="range" id="darkSlider" min="0" max="100" step="5" value="0" title="Darken the map"></label>
+        <label class="dk">Text <input type="range" id="darkSlider" min="0" max="100" step="5" value="60" title="Make map text darker and easier to read"></label>
       </div>
-      <button class="rbtn" id="darkBtn" title="Darken map">◐</button>
+      <button class="rbtn" id="darkBtn" title="Darker map text">Aa</button>
       <button class="rbtn" id="zin" title="Zoom in">+</button>
       <button class="rbtn" id="zout" title="Zoom out">−</button>
       <button class="rbtn" id="locBtn" title="My location">➤</button>
@@ -449,9 +453,12 @@ let origin = null;   // the place last searched with Go: walks that end there ar
 const selected = new Set();
 const AUCKLAND_CBD = [-36.8485, 174.7633];
 const map = L.map('map', {zoomControl: false}).setView(AUCKLAND_CBD, 13);
+map.createPane('maplabels').style.zIndex = 250;   // above the map tiles, below routes and pins
 const BASES = {
   streets: CARTO_KEY
-    ? L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=' + encodeURIComponent(CARTO_KEY), {maxZoom: 20, attribution: '© OpenStreetMap contributors © CARTO'})
+    ? L.layerGroup([   // the map without words, plus a words-only layer we can darken on its own
+        L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png?key=' + encodeURIComponent(CARTO_KEY), {maxZoom: 20, attribution: '© OpenStreetMap contributors © CARTO'}),
+        L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png?key=' + encodeURIComponent(CARTO_KEY), {maxZoom: 20, pane: 'maplabels'})])
     : L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© OpenStreetMap contributors'}),
   sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom: 19, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'}),
   topo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom: 17, subdomains: 'abc', attribution: '© OpenStreetMap contributors, SRTM | © OpenTopoMap (CC-BY-SA)'}),
@@ -502,14 +509,15 @@ document.querySelectorAll('#layerbox button').forEach(b => {
   };
 });
 
-// ---- map darkening (tile pane only, so pins and routes stay crisp) ----
-let darkLvl = 0;
-try { const d = parseInt(localStorage.getItem('walkbox.dark'), 10); if (d >= 0 && d <= 100) darkLvl = d; } catch (e) { /* default */ }
+// ---- map text strength (darkens the words on the map, not the map itself) ----
+let darkLvl = 60;
+try { const d = parseInt(localStorage.getItem('walkbox.text'), 10); if (d >= 0 && d <= 100) darkLvl = d; } catch (e) { /* default */ }
 function setDark(v, save) {
   darkLvl = Math.max(0, Math.min(100, v)); const f = darkLvl / 100, st = document.documentElement.style;
-  st.setProperty('--tb', (1 - 0.5 * f).toFixed(3)); st.setProperty('--tc', (1 + 0.35 * f).toFixed(3)); st.setProperty('--ts', (1 + 0.3 * f).toFixed(3));
+  st.setProperty('--lb', (1 - 0.85 * f).toFixed(3)); st.setProperty('--lc', (1 + 1.5 * f).toFixed(3)); st.setProperty('--lh', (0.9 * f).toFixed(3));
+  st.setProperty('--tc', CARTO_KEY ? 1 : (1 + 0.2 * f).toFixed(3));
   $('darkSlider').value = darkLvl; $('darkBtn').classList.toggle('on', darkLvl > 0);
-  if (save) try { localStorage.setItem('walkbox.dark', String(darkLvl)); } catch (e) { /* not important */ }
+  if (save) try { localStorage.setItem('walkbox.text', String(darkLvl)); } catch (e) { /* not important */ }
 }
 $('darkSlider').oninput = e => setDark(+e.target.value, true);
 $('darkBtn').onclick = () => setDark(darkLvl >= 100 ? 0 : (Math.floor(darkLvl / 25) + 1) * 25, true);
@@ -1814,10 +1822,14 @@ function makeCard(r) {
   return item;
 }
 
-let pinEls = {};
-function pinHot(id, on) { const el = pinEls[id]; if (el) el.classList.toggle('sel', on || (sel && sel.r.osm_id == id)); }
+let pinEls = {}, pinMk = {};
+function pinHot(id, on) {                                  // lights up the map pin of the card under the mouse
+  const el = pinEls[id], keep = sel && sel.r.osm_id == id;
+  if (el) el.classList.toggle('sel', on || keep);
+  if (pinMk[id]) pinMk[id].setZIndexOffset(on ? 1000 : 0);
+}
 function drawPins() {
-  pinLayer.clearLayers(); pinEls = {};
+  pinLayer.clearLayers(); pinEls = {}; pinMk = {};
   if (mode === 'data') return;
   const z = map.getZoom(), cell = 72, groups = new Map();
   shown().forEach(r => {
@@ -1836,7 +1848,7 @@ function drawPins() {
       mk.on('click', () => openWalk(r.osm_id));
       mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); });
       mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); });
-      mk.addTo(pinLayer);
+      mk.addTo(pinLayer); pinMk[r.osm_id] = mk;
       setTimeout(() => { const e = mk.getElement && mk.getElement(); if (e) pinEls[r.osm_id] = e.querySelector('.pin1, .pinl'); }, 0);
     } else {
       const lat = list.reduce((a, r) => a + r.lat, 0) / list.length, lon = list.reduce((a, r) => a + r.lon, 0) / list.length;
