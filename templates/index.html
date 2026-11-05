@@ -272,6 +272,9 @@
   #elev.float::before { display:none; } #elev.float .elx { display:block; }
   #dFoot { position:sticky; bottom:0; margin:0 -18px; padding:10px 18px 14px; background:linear-gradient(rgba(255,255,255,0), #fff 30%); }
   #dFoot button { width:100%; background:var(--dark); color:#fff; border:0; border-radius:28px; padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
+  .bigbtn { display:block; width:100%; margin:18px 0 6px; background:var(--dark); color:#fff; border:0; border-radius:28px; padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
+  .bigbtn:hover { background:#2a3a27; }
+  #dMore .navp { margin-top:8px; }
   #dMore .wnow { font-size:15px; font-weight:600; }
   #info .sub { color:var(--mute); font-size:12px; }
   /* ===== v3: AllTrails-style header bar, floating search button, pill pins ===== */
@@ -1573,7 +1576,7 @@ function loadInfo(s) {
     const panel = mk('div'); panel.style.display = 'none'; more.appendChild(panel);
     togglePanel(r, mk('button'), panel, true);
   }
-  more.appendChild(mk('div', 'sec', 'Navigate')); more.appendChild(makeNav(r));
+  more.appendChild(makeNav(r, true));
   if (s.terrain) showDifficulty(s);
   // download
   const dl = mk('button', '', '⬇ Download GPX'); dl.onclick = () => downloadGpx().catch(e => status(e.message, true)); foot.appendChild(dl);
@@ -1670,9 +1673,11 @@ function startLive(s) {
   }, err => { if (sel === s) { bar.className = 'off'; bar.textContent = 'Live location is off: ' + err.message; } },
   {enableHighAccuracy: true, maximumAge: 5000, timeout: 20000});
 }
-function makeNav(r) {
-  const wrap = document.createElement('span');
-  const btn = document.createElement('button'); btn.className = 'b alt'; btn.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px'; btn.textContent = 'Navigate';
+function makeNav(r, big) {              // big = the full-width button on the walk page; small = the link on a box card
+  const wrap = document.createElement(big ? 'div' : 'span');
+  const btn = document.createElement('button');
+  if (big) { btn.className = 'bigbtn'; btn.textContent = 'Navigate turn by turn'; }
+  else { btn.className = 'b alt'; btn.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px'; btn.textContent = 'Navigate'; }
   const panel = document.createElement('div'); panel.className = 'navp'; panel.style.display = 'none'; panel.onclick = e => e.stopPropagation();
   const L_ = navLinks(r);
   const add = (href, text) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = text; panel.appendChild(a); };
