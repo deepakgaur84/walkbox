@@ -1053,7 +1053,6 @@ def public(walk, added=False, preview=True):
         "done_at": walk.get("done_at"),
         "place": walk.get("place"), "added_at": walk.get("added_at"),
         "my_rating": walk.get("my_rating"), "my_note": walk.get("my_note"),
-        "preview": bool(walk.get("_preview")),          # the line is a quick outline: the full route loads when opened
     }
     if preview and walk.get("chains"):
         d["line"] = [simplify(c) for c in walk["chains"][:20]]
@@ -1082,29 +1081,6 @@ def nearest_first(walks, centre, limit):
         return (wk["lat"] - cy) ** 2 + ((wk["lon"] - cx) * k) ** 2
     walks = sorted(walks, key=lambda wk: (far(wk), -(wk.get("distance_km") or 0)))
     return walks[:limit] if limit and limit > 0 else walks
-
-
-def with_previews(walks):
-    """Give search results their route line when the stored copy has one, so every path shows on the map at once.
-    The results themselves are copied, never changed: the cache keeps the light versions."""
-    need = [wk["osm_id"] for wk in walks if not wk.get("chains")]
-    if not need:
-        return walks
-    lines = {}
-    try:
-        for i in range(0, len(need), 500):
-            part = need[i:i + 500]
-            for row in db().execute("SELECT osm_id, detail FROM store WHERE detail IS NOT NULL AND osm_id IN (%s)"
-                                    % ",".join("?" * len(part)), part):
-                try:
-                    chains = (json.loads(row["detail"]) or {}).get("chains")
-                except ValueError:
-                    chains = None
-                if chains:
-                    lines[row["osm_id"]] = chains
-    except sqlite3.Error:
-        return walks                                  # no preview is better than no search
-    return [dict(wk, chains=lines[wk["osm_id"]], _preview=True) if wk["osm_id"] in lines else wk for wk in walks]
 
 
 @app.post("/api/search")
@@ -1147,7 +1123,6 @@ def api_search():
     walks.sort(key=lambda x: (order.get(x["source"], 9), -(x["distance_km"] or 0)))
     total = len(walks)
     walks = nearest_first(walks, centre, SEARCH_LIMIT)
-    walks = with_previews(walks)
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks],
                    warnings=problems, capped=total >= MAX_RESULTS or len(walks) < total, truncated=len(walks) < total,
                    total=total, ms=int((time.time() - t0) * 1000))

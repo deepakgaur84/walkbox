@@ -183,12 +183,9 @@
   .item:hover .ct { text-decoration:underline; }
   .item.sel { background:var(--brand2); box-shadow:0 0 0 6px var(--brand2); }
   .item.hot { box-shadow:0 0 0 4px #cfe3c4; }
-  .item .ph { position:relative; height:176px; border-radius:14px; overflow:hidden; background:#cfd8c9; }
-  .item .ph img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .3s; }
-  .item .ph img.in { opacity:1; }
-  .item .ph .art { position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:flex-start; padding:10px 12px; color:rgba(255,255,255,.9); font-size:12px; font-weight:600; }
-  .item .ph .art svg { position:absolute; right:-6px; bottom:-8px; width:150px; opacity:.22; }
-  .heart { position:absolute; right:10px; top:10px; width:38px; height:38px; border-radius:50%; background:#fff; border:0; font-size:19px; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.25); display:flex; align-items:center; justify-content:center; padding:0; color:#1d241c; }
+  .item { padding:12px 14px 12px; margin:0 0 4px; border-bottom:1px solid var(--line); border-radius:12px; }
+  .item .ct { padding-right:44px; }
+  .heart { position:absolute; right:10px; top:10px; width:34px; height:34px; border-radius:50%; background:#fff; border:1px solid var(--line); font-size:17px; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; color:#1d241c; }
   .heart.on { color:#c62828; }
   .item .ct { font-size:16px; font-weight:700; margin:9px 2px 0; line-height:1.25; }
   .item .cs { font-size:13px; color:var(--mute); margin:1px 2px 0; }
@@ -270,8 +267,11 @@
   #elev .elx { display:none; }
   #elev.float { position:absolute; left:12px; right:12px; bottom:22px; z-index:900; background:#fff; border-radius:18px; box-shadow:0 2px 10px rgba(0,0,0,.3); padding:8px 12px 4px; margin:0; }
   #elev.float::before { display:none; } #elev.float .elx { display:block; }
+  #dFoot:empty { display:none; }
   #dFoot { position:sticky; bottom:0; margin:0 -18px; padding:10px 18px 14px; background:linear-gradient(rgba(255,255,255,0), #fff 30%); }
   #dFoot button { width:100%; background:var(--dark); color:#fff; border:0; border-radius:28px; padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
+  .navsplit { display:flex; gap:2px; margin:18px 0 6px; } .navsplit .bigbtn { margin:0; }
+  .navsplit .main { flex:1; border-radius:28px 0 0 28px; } .navsplit .caret { width:54px; border-radius:0 28px 28px 0; padding:15px 0; }
   .bigbtn { display:block; width:100%; margin:18px 0 6px; background:var(--dark); color:#fff; border:0; border-radius:28px; padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
   .bigbtn:hover { background:#2a3a27; }
   #dMore .navp { margin-top:8px; }
@@ -602,7 +602,7 @@ const FIND_KEY = 'walkbox.find.v1', FIND_MAX_AGE = 6 * 3600 * 1000;
 function persistFind() {                    // the light list only: routes are fetched again (instantly, from the server cache) when opened
   try {
     if (!findState || !findState.results.length) return;
-    const light = findState.results.map(r => { const c = Object.assign({}, r); if (!c.preview) delete c.line; delete c._originStamp; delete c.reversed; delete c.autoSwapped; delete c.est; return c; });
+    const light = findState.results.map(r => { const c = Object.assign({}, r); delete c.line; delete c._originStamp; delete c.reversed; delete c.autoSwapped; delete c.est; return c; });
     localStorage.setItem(FIND_KEY, JSON.stringify({t: Date.now(), state: Object.assign({}, findState, {results: light, selected: []}),
       boxes: ['srcDoc', 'srcNz', 'srcRoutes', 'srcPaths'].map(id => $(id).checked)}));
   } catch (e) { /* storage full or blocked: not important */ }
@@ -1579,7 +1579,7 @@ function loadInfo(s) {
   more.appendChild(makeNav(r, true));
   if (s.terrain) showDifficulty(s);
   // download
-  const dl = mk('button', '', '⬇ Download GPX'); dl.onclick = () => downloadGpx().catch(e => status(e.message, true)); foot.appendChild(dl);
+  const dl = mk('button', 'lnk', '⬇ Download GPX'); dl.style.margin = '10px 0 4px'; dl.onclick = () => downloadGpx().catch(e => status(e.message, true)); more.appendChild(dl);
   async function downloadGpx() { await addOne(r); location.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); }
   const mid = pointAt(s.chain, s.cum, s.cum[s.cum.length - 1] / 2);
   cachedGet('/api/weather?lat=' + mid[0].toFixed(4) + '&lon=' + mid[1].toFixed(4))
@@ -1673,14 +1673,19 @@ function startLive(s) {
   }, err => { if (sel === s) { bar.className = 'off'; bar.textContent = 'Live location is off: ' + err.message; } },
   {enableHighAccuracy: true, maximumAge: 5000, timeout: 20000});
 }
-function makeNav(r, big) {              // big = the full-width button on the walk page; small = the link on a box card
+function makeNav(r, big) {              // big = the walk page: one button, its default action plus a drop-down of other apps
   const wrap = document.createElement(big ? 'div' : 'span');
   const btn = document.createElement('button');
-  if (big) { btn.className = 'bigbtn'; btn.textContent = 'Navigate turn by turn'; }
-  else { btn.className = 'b alt'; btn.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px'; btn.textContent = 'Navigate'; }
   const panel = document.createElement('div'); panel.className = 'navp'; panel.style.display = 'none'; panel.onclick = e => e.stopPropagation();
+  const out = document.createElement('div'); out.style.cssText = 'font-size:13px;margin-top:8px';
   const L_ = navLinks(r);
-  const add = (href, text) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = text; panel.appendChild(a); };
+  const add = (href, text) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = text; a.style.display = 'block'; panel.appendChild(a); };
+  const act = (text, fn) => { const b = document.createElement('button'); b.className = 'lnk'; b.style.cssText = 'display:block;margin:2px 0;text-align:left'; b.textContent = text; b.onclick = fn; panel.appendChild(b); return b; };
+  let startBtn = null;
+  if (ROUTING) {
+    startBtn = act('Turn-by-turn to the start', () => routeToStart(r, out, startBtn));
+    if (r.added) { const b2 = act('Turn-by-turn along this walk', () => getRoute({mode: 'along', walk_id: r.osm_id, reverse: !!r.reversed}, out, b2, 'Along the walk')); }
+  }
   add(L_.toStart, 'Directions to the start (Google Maps)');
   add(L_.walk, 'Walk the route (Google Maps)');
   add(L_.apple, 'Apple Maps to the start');
@@ -1690,21 +1695,20 @@ function makeNav(r, big) {              // big = the full-width button on the wa
   const note = document.createElement('div'); note.className = 'att'; note.style.cssText = 'font-size:11px;color:var(--mute);margin:4px 0';
   note.textContent = 'Google Maps follows its own paths between a few points on the walk, so it is approximate. For the exact track, download the GPX and open it in Organic Maps or OsmAnd (needs the app installed on your phone).';
   panel.append(note);
-  if (ROUTING) {
-    const rb = document.createElement('div'); rb.style.marginTop = '8px';
-    const out = document.createElement('div'); out.style.fontSize = '13px';
-    const b1 = document.createElement('button'); b1.className = 'b alt'; b1.style.cssText = 'padding:4px 10px;font-size:13px;margin-right:6px'; b1.textContent = 'Turn-by-turn to the start';
-    b1.onclick = () => routeToStart(r, out, b1);
-    rb.appendChild(b1);
-    if (r.added) {
-      const b2 = document.createElement('button'); b2.className = 'b alt'; b2.style.cssText = 'padding:4px 10px;font-size:13px'; b2.textContent = 'Turn-by-turn along this walk';
-      b2.onclick = () => getRoute({mode: 'along', walk_id: r.osm_id, reverse: !!r.reversed}, out, b2, 'Along the walk');
-      rb.appendChild(b2);
-    }
-    panel.append(rb, out);
+  const toggle = () => { panel.style.display = panel.style.display === 'none' ? '' : 'none'; };
+  if (big) {
+    btn.className = 'bigbtn main'; btn.textContent = 'Navigate turn by turn';
+    // the default: turn-by-turn from where you are to the start (or Google Maps when routing is not set up)
+    btn.onclick = e => { e.stopPropagation(); if (startBtn) routeToStart(r, out, startBtn); else window.open(L_.toStart, '_blank', 'noopener'); };
+    const caret = document.createElement('button'); caret.className = 'bigbtn caret'; caret.textContent = '▾'; caret.title = 'Other ways to navigate';
+    caret.onclick = e => { e.stopPropagation(); toggle(); };
+    const row = document.createElement('div'); row.className = 'navsplit'; row.append(btn, caret);
+    wrap.append(row, panel, out);
+  } else {
+    btn.className = 'b alt'; btn.style.cssText = 'margin-top:6px;padding:4px 10px;font-size:13px'; btn.textContent = 'Navigate';
+    btn.onclick = e => { e.stopPropagation(); toggle(); };
+    wrap.append(btn, panel, out);
   }
-  btn.onclick = e => { e.stopPropagation(); panel.style.display = panel.style.display === 'none' ? '' : 'none'; };
-  wrap.append(btn, panel);
   return wrap;
 }
 
@@ -1762,49 +1766,16 @@ async function del(id) {
 }
 
 // ---- Rendering: cards, map dots and clusters ----
-const photoMemo = new Map();      // walk id -> the photo found for its card (or null)
-const photoQueue = []; let photoBusy = 0;
-function pumpPhotos() {
-  while (photoBusy < 2 && photoQueue.length) {
-    const job = photoQueue.shift(); photoBusy++;
-    job().finally(() => { photoBusy--; pumpPhotos(); });
-  }
-}
-function paintPhoto(el, p) {
-  if (!p || !el.isConnected) return;
-  const img = document.createElement('img'); img.alt = ''; img.loading = 'lazy'; img.src = p.thumb;
-  img.title = (p.caption ? p.caption + ' · ' : '') + p.by + ' · ' + p.license + ' (Wikimedia Commons)';
-  img.onload = () => img.classList.add('in'); el.querySelector('.ph').prepend(img);
-}
-const photoObs = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => {
-  if (!e.isIntersecting) return;
-  photoObs.unobserve(e.target); const el = e.target, id = el.dataset.id;
-  if (photoMemo.has(id)) { paintPhoto(el, photoMemo.get(id)); return; }
-  const r = results.find(x => x.osm_id == id); if (!r || r.lat == null || r.lon == null) return;
-  photoQueue.push(async () => {
-    try {
-      const j = await fetch('/api/photo_near?lat=' + r.lat.toFixed(5) + '&lon=' + r.lon.toFixed(5)).then(x => x.json());
-      photoMemo.set(id, j.photo || null); paintPhoto(el, j.photo);
-    } catch (err) { /* no picture: the card keeps its colour */ }
-  });
-  pumpPhotos();
-}), {rootMargin: '240px'}) : null;
-function hueOf(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
-const MOUNTAIN = '<svg viewBox="0 0 100 60" fill="#fff"><path d="M0 60 L28 14 L44 38 L62 6 L100 60 Z"/></svg>';
 function diffText(r) { return r.difficulty || (r.est ? r.est.label : null); }
 
 function makeCard(r) {
   const item = document.createElement('div'); item.className = 'item'; item.id = 'w' + r.osm_id; item.dataset.id = r.osm_id;
-  const ph = document.createElement('div'); ph.className = 'ph';
-  const h = hueOf(r.name); ph.style.background = 'linear-gradient(135deg, hsl(' + h + ',32%,60%), hsl(' + ((h + 40) % 360) + ',34%,38%))';
-  const art = document.createElement('div'); art.className = 'art'; art.innerHTML = MOUNTAIN; art.append(r.source_label || '');
-  ph.appendChild(art);
   const heart = document.createElement('button'); heart.className = 'heart' + (r.added ? ' on' : ''); heart.textContent = r.added ? '♥' : '♡';
   heart.title = r.added ? 'Saved in my box: tap to remove' : 'Save to my box';
   heart.onclick = async e => { e.stopPropagation(); try { r.added ? await removeOne(r) : await addOne(r); } catch (err) { status(err.message, true); } };
-  ph.appendChild(heart); item.appendChild(ph);
+  item.appendChild(heart);
   const t = document.createElement('div'); t.className = 'ct'; t.textContent = r.name; item.appendChild(t);
-  const sub = [r.region || r.place, r.operator && r.operator !== r.region ? r.operator : null].filter(Boolean).join(' · ');
+  const sub = [r.region || r.place, r.operator && r.operator !== r.region ? r.operator : null, r.source_label].filter(Boolean).join(' · ');
   if (sub) { const s = document.createElement('div'); s.className = 'cs'; s.textContent = sub; item.appendChild(s); }
   const m = document.createElement('div'); m.className = 'cm';
   const bk = diffBucket(r), dt = diffText(r);
@@ -1821,30 +1792,21 @@ function makeCard(r) {
     gb.onclick = e => { e.stopPropagation(); togglePanel(r, gb, panel); };
     acts.appendChild(gb);
     if (r.line && r.line[0] && r.line[0].length > 1) acts.appendChild(makeNav(r));
-    const a = document.createElement('a'); a.className = 'dl b'; a.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); a.textContent = 'Download GPX'; a.onclick = e => e.stopPropagation();
+    const a = document.createElement('a'); a.className = 'dl lnk'; a.href = '/walks/' + r.osm_id + '.gpx' + (r.reversed ? '?reverse=1' : ''); a.textContent = 'Download GPX'; a.onclick = e => e.stopPropagation();
     acts.appendChild(a);
     const rm = document.createElement('button'); rm.className = 'del'; rm.textContent = 'Remove'; rm.onclick = e => { e.stopPropagation(); del(r.osm_id); };
     acts.appendChild(rm); item.append(acts, panel);
   }
   item.onclick = () => openWalk(r.osm_id);
   item.onmouseenter = () => pinHot(r.osm_id, true); item.onmouseleave = () => pinHot(r.osm_id, false);
-  if (photoObs) photoObs.observe(item);
   return item;
 }
 
-const HOT_LINE = {color: '#1b5e20', weight: 8, opacity: 1};
-function lineHot(id, on) {                                  // the path of the walk under the mouse stands out
-  const l = lines[id]; if (!l) return;
-  const r = results.find(x => x.osm_id == id); if (sel && sel.r.osm_id == id) return;
-  l.setStyle(on ? HOT_LINE : {color: r && r.added ? '#3b6b2a' : '#d2691e', weight: 4, opacity: .8});
-  if (on) l.bringToFront();
-}
 let pinEls = {}, pinMk = {};
 function pinHot(id, on) {                                  // lights up the map pin of the card under the mouse
   const el = pinEls[id], keep = sel && sel.r.osm_id == id;
   if (el) el.classList.toggle('sel', on || keep);
   if (pinMk[id]) pinMk[id].setZIndexOffset(on ? 1000 : 0);
-  lineHot(id, on);
 }
 function drawPins() {
   pinLayer.clearLayers(); pinEls = {}; pinMk = {};
@@ -1864,8 +1826,8 @@ function drawPins() {
         : '<div class="pinl"><i class="pin1' + (isSel ? ' sel' : '') + '"></i></div>';
       const mk = L.marker([r.lat, r.lon], {icon: L.divIcon({className: '', html, iconSize: lab ? [64, 24] : [16, 16], iconAnchor: lab ? [32, 12] : [8, 8]}), riseOnHover: true});
       mk.on('click', () => openWalk(r.osm_id));
-      mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); lineHot(r.osm_id, true); });
-      mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); lineHot(r.osm_id, false); });
+      mk.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) el.classList.add('hot'); });
+      mk.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); });
       mk.addTo(pinLayer); pinMk[r.osm_id] = mk;
       setTimeout(() => { const e = mk.getElement && mk.getElement(); if (e) pinEls[r.osm_id] = e.querySelector('.pin1, .pinl'); }, 0);
     } else {
@@ -1891,8 +1853,6 @@ function render(keep) {
     if (r.line && r.line.length) {
       const pl = L.polyline(r.line, {color: r.added ? '#3b6b2a' : '#d2691e', weight: 4, opacity: .8})
         .bindTooltip(r.name, {sticky: true}).on('click', () => openWalk(r.osm_id)).addTo(layerGroup);
-      pl.on('mouseover', () => { const el = $('w' + r.osm_id); if (el) { el.classList.add('hot'); el.scrollIntoView({block: 'nearest'}); } lineHot(r.osm_id, true); });
-      pl.on('mouseout', () => { const el = $('w' + r.osm_id); if (el) el.classList.remove('hot'); lineHot(r.osm_id, false); });
       lines[r.osm_id] = pl; all.push(pl);
     }
   });
@@ -1918,12 +1878,12 @@ function applyOrigin(r) {              // start the walk at the place that was s
 }
 async function openWalk(id) {          // routes are fetched only when a walk is clicked
   const r = results.find(x => x.osm_id == id); if (!r) return;
-  if (!r.line || r.preview) {
+  if (!r.line) {
     if (loadingIds.has(id)) return;
     loadingIds.add(id);
     const el = $('w' + id); if (el) el.style.opacity = .55;
     status('Loading the route for “' + r.name + '”…');
-    try { Object.assign(r, await post('/api/detail', {id}), {preview: false}); status('Loaded “' + r.name + '”.'); }
+    try { Object.assign(r, await post('/api/detail', {id})); status('Loaded “' + r.name + '”.'); }
     catch (e) { status(e.message, true); loadingIds.delete(id); if (el) el.style.opacity = ''; return; }
     loadingIds.delete(id);
     if (!results.includes(r)) return;     // the list changed while loading
