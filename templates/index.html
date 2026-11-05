@@ -421,7 +421,7 @@
         <span class="cr">
           <span id="findActions" style="display:none"><button id="selAllBtn" class="lnk">Add all to my box</button><button id="addSelBtn" style="display:none">Add selected to my box</button></span>
           <select id="sortSel" title="Order the list">
-            <option value="rel">Most relevant</option>
+            <option value="rel">Nearest first</option>
             <option value="long">Longest</option>
             <option value="short">Shortest</option>
             <option value="az">Name A–Z</option>
@@ -445,6 +445,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const MAX_SPAN = {{ max_span }};
+const SEARCH_LIMIT = {{ search_limit }};     // walks listed per map search (0 = no limit)
 const ROUTING = {{ 'true' if routing_enabled else 'false' }};
 const CARTO_KEY = {{ carto_key|tojson }};     // optional: a free CARTO key gives the cleaner street map
 let mode = 'find';
@@ -729,6 +730,7 @@ function searchClick() { return $('place').value.trim() ? runNameSearch() : runS
 let searchCtl = null, searchSeq = 0;
 const searchMemo = new Map();           // finished searches of this session, by map view and source
 const SOURCE_ORDER = ['doc', 'nz-track', 'osm-route', 'osm-path'];
+let mergeTotal = 0;
 function mergeResults(bySource) {   // keep routes already loaded, drop duplicates of the same name from less curated sources
   const old = new Map(results.map(r => [r.osm_id, r]));
   const out = [];
@@ -738,8 +740,11 @@ function mergeResults(bySource) {   // keep routes already loaded, drop duplicat
   let merged = out.filter(r => !(r.source === 'nz-track' && doc.has(r.name.toLowerCase())));
   const cur = new Set(merged.filter(r => r.source === 'doc' || r.source === 'nz-track').map(r => r.name.toLowerCase()));
   merged = merged.filter(r => !(r.source === 'osm-path' && cur.has(r.name.toLowerCase())));
-  merged.sort((a, b) => (SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source)) || ((b.distance_km || 0) - (a.distance_km || 0)));
-  return merged;
+  const c = map.getCenter(), k = Math.cos(c.lat * Math.PI / 180);       // nearest the middle of the map first
+  const far = r => r.lat == null || r.lon == null ? 1e9 : (r.lat - c.lat) ** 2 + ((r.lon - c.lng) * k) ** 2;
+  merged.sort((a, b) => (far(a) - far(b)) || ((b.distance_km || 0) - (a.distance_km || 0)));
+  mergeTotal = merged.length;
+  return SEARCH_LIMIT > 0 ? merged.slice(0, SEARCH_LIMIT) : merged;
 }
 async function runSearch() {
   const b = map.getBounds();
@@ -765,7 +770,7 @@ async function runSearch() {
       searchMemo.forEach(v => { if (!seen && v.key === key && Date.now() - v.t < 30 * 60000 && v.s <= sn.s + 1e-9 && v.w <= sn.w + 1e-9 && v.n >= sn.n - 1e-9 && v.e >= sn.e - 1e-9) seen = v; });
       let j;
       if (seen) j = Object.assign({}, seen.j, {ms: 0, cached: true});
-      else { j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources: [key]}, signal); if (!(j.warnings || []).length) searchMemo.set(Date.now() + key, Object.assign({t: Date.now(), j, key}, sn)); }
+      else { j = await post('/api/search', {south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast(), sources: [key]}, signal); if (!(j.warnings || []).length && !j.truncated) searchMemo.set(Date.now() + key, Object.assign({t: Date.now(), j, key}, sn)); }
       if (mine !== searchSeq) return;
       bySource[key] = j.results; capped = capped || j.capped; (j.warnings || []).forEach(w => warnings.push(w));
       state[key] = '✓ ' + j.results.length + (j.cached ? ' (saved)' : j.ms > 200 ? ' (' + (j.ms / 1000).toFixed(1) + ' s)' : j.ms ? ' (cached)' : '');
@@ -782,7 +787,7 @@ async function runSearch() {
   window.setTimeout(() => { if (mode === 'find') saveFindState(); }, 50);
   const warn = warnings.length ? ' Note: ' + warnings.join(' | ') : '';
   show(true);
-  status((results.length ? (capped ? 'List capped: zoom in for more. ' : '') + 'Tap a walk to see its route.' : 'No walks found here. Try another area or turn on more sources (Sources on the map).') + warn, !!warn && !results.length);
+  status((results.length ? (capped || mergeTotal > results.length ? 'Showing the ' + results.length + ' walks nearest the middle of the map: pan or zoom in for others. ' : '') + 'Tap a walk to see its route.' : 'No walks found here. Try another area or turn on more sources (Sources on the map).') + warn, !!warn && !results.length);
 }
 // Search by walk name across all of NZ: not limited to the map view
 async function runNameSearch() {

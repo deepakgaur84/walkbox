@@ -29,6 +29,7 @@ services:
       # --- Searching
       MAX_SPAN_DEG: "${MAX_SPAN_DEG:-0.5}"
       MAX_RESULTS: "${MAX_RESULTS:-150}"
+      SEARCH_LIMIT: "${SEARCH_LIMIT:-25}"
       SEARCH_CACHE_SECONDS: "${SEARCH_CACHE_SECONDS:-21600}"
       # --- Import and photos
       MAX_IMPORT_MB: "${MAX_IMPORT_MB:-15}"

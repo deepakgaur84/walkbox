@@ -66,6 +66,7 @@ SEED_PAUSE = float(os.environ.get("SEED_PAUSE_SECONDS", "0.3"))          # a pol
 OSM_REFRESH_DAYS = float(os.environ.get("OSM_REFRESH_DAYS", "30"))        # the OSM file and store are renewed this often (0 = never by themselves)
 MAX_SPAN_DEG = float(os.environ.get("MAX_SPAN_DEG", "0.5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "150"))
+SEARCH_LIMIT = int(os.environ.get("SEARCH_LIMIT", "25"))       # walks shown per map search, nearest the map centre first; 0 = no limit
 MAX_PATH_WAYS = int(os.environ.get("MAX_PATH_WAYS", "2500"))
 MIN_PATH_KM = float(os.environ.get("MIN_PATH_KM", "0.8"))
 MIN_TRACK_KM = float(os.environ.get("MIN_TRACK_KM", "0.3"))
@@ -1057,12 +1058,25 @@ def public(walk, added=False, preview=True):
 @app.route("/")
 def index():
     return render_template("index.html", max_span=MAX_SPAN_DEG, routing_enabled=bool(VALHALLA_URL),
-                           carto_key=os.environ.get("CARTO_KEY", "").strip())
+                           carto_key=os.environ.get("CARTO_KEY", "").strip(), search_limit=SEARCH_LIMIT)
 
 
 @app.route("/healthz")
 def healthz():
     return "ok"
+
+
+def nearest_first(walks, centre, limit):
+    """Order walks by distance from the map centre and keep the nearest `limit` (0 = keep all)."""
+    cy, cx = centre
+    k = math.cos(math.radians(cy))
+
+    def far(wk):
+        if wk.get("lat") is None or wk.get("lon") is None:
+            return 1e9                                 # no position: last
+        return (wk["lat"] - cy) ** 2 + ((wk["lon"] - cx) * k) ** 2
+    walks = sorted(walks, key=lambda wk: (far(wk), -(wk.get("distance_km") or 0)))
+    return walks[:limit] if limit and limit > 0 else walks
 
 
 def with_previews(walks):
@@ -1099,6 +1113,7 @@ def api_search():
         return jsonify(error="Invalid map area"), 400
     if e < w:
         return jsonify(error="Please pan the map so it does not cross the date line"), 400
+    centre = ((s + n) / 2, (w + e) / 2)                # the list is ordered by distance from here
     if (n - s) > MAX_SPAN_DEG or (e - w) > MAX_SPAN_DEG:
         return jsonify(error="Zoom in further: the search area is too large (max about %d km)."
                        % int(MAX_SPAN_DEG * 111)), 400
@@ -1125,9 +1140,12 @@ def api_search():
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
     order = {"doc": 0, "nz-track": 1, "osm-route": 2, "osm-path": 3}
     walks.sort(key=lambda x: (order.get(x["source"], 9), -(x["distance_km"] or 0)))
+    total = len(walks)
+    walks = nearest_first(walks, centre, SEARCH_LIMIT)
     walks = with_previews(walks)
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks],
-                   warnings=problems, capped=len(walks) >= MAX_RESULTS, ms=int((time.time() - t0) * 1000))
+                   warnings=problems, capped=total >= MAX_RESULTS or len(walks) < total, truncated=len(walks) < total,
+                   total=total, ms=int((time.time() - t0) * 1000))
 
 
 @app.post("/api/walks")

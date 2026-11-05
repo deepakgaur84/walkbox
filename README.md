@@ -239,7 +239,8 @@ All settings are in `.env` (see `.env.example` for every one, with its default a
 | PATH_HIGHWAYS | footway\|path\|track\|pedestrian | OSM path types used for "Named paths". |
 | MAX_PATH_WAYS | 2500 | Most path pieces read per live search (before the store is built). |
 | MAX_SPAN_DEG | 0.5 | Largest map area searched (degrees, about 55 km). |
-| MAX_RESULTS | 150 | Most routes returned per search. |
+| MAX_RESULTS | 150 | Most routes fetched from the sources per search (an upper bound). |
+| SEARCH_LIMIT | 25 | Walks listed per map search, nearest the middle of the map first. 0 = no limit. |
 | SEARCH_CACHE_SECONDS | 21600 | How long a finished search of the same area is remembered. |
 | MAX_IMPORT_MB | 15 | Largest GPX file accepted by Import GPX. |
 | PHOTOS_PER_MINUTE | 30 | Most photo lookups per minute (keeps Wikimedia requests polite). |

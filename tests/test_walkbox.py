@@ -250,8 +250,16 @@ assert loop["source"] == "osm-route" and loop["distance_km"] is None and loop["d
 assert loop["time_text"] is None and by_name["Unnamed route 222"]["osm_id"] == 222
 rocky = by_name["Rocky Headland Track"]
 assert rocky["source"] == "osm-path" and rocky["approx"] and rocky["distance_km"] >= 0.8
-srcs = [x["source"] for x in res]
-assert res[0]["source"] == "doc" and srcs.index("nz-track") < srcs.index("osm-route") < srcs.index("osm-path")
+# the list is ordered by distance from the middle of the map, and only SEARCH_LIMIT walks are kept
+cy, cx = (-36.9 + -36.7) / 2, (174.7 + 174.9) / 2
+dist = [((x["lat"] - cy) ** 2 + (x["lon"] - cx) ** 2) for x in res if x["lat"] is not None]
+assert dist == sorted(dist), "results must run nearest the map centre first"
+pool = [{"osm_id": i, "lat": -36.8 + i * 0.01, "lon": 174.8, "distance_km": 1.0} for i in range(1, 60)]
+pool.append({"osm_id": 999, "lat": None, "lon": None})
+top = wb.nearest_first(pool, (-36.8, 174.8), 25)
+assert len(top) == 25 and top[0]["osm_id"] == 1 and top[-1]["osm_id"] != 999
+assert len(wb.nearest_first(pool, (-36.8, 174.8), 0)) == 60 and wb.nearest_first(pool, (-36.8, 174.8), 0)[-1]["osm_id"] == 999
+assert wb.SEARCH_LIMIT == 25
 
 # source selection / validation
 calls.clear()
