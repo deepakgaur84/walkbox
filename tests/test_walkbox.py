@@ -1206,6 +1206,14 @@ assert any("LIKE '%KAURI%'" in str(p.get("where")) for p in fl), fl             
 assert not any("geometry" in p for p in fl if "where" in p and "LIKE" in str(p["where"]))
 r = c.post("/api/find", json={"q": "Takapuna  beach", "sources": ["doc", "nz"]}).get_json()
 assert [x["name"] for x in r["results"]] == ["Takapuna Beach Walkway"] and r["results"][0]["source"] == "nz-track", r   # every word must match, in any order
+# the name search runs in steps: the map first, then Auckland, then the rest of NZ, each skipping what an earlier step covered
+_lat, _lon = r["results"][0]["lat"], r["results"][0]["lon"]
+_map = [_lat - 0.05, _lon - 0.05, _lat + 0.05, _lon + 0.05]; _far = [-47.0, 166.0, -45.0, 168.0]
+body = {"q": "Takapuna beach", "sources": ["doc", "nz"]}
+assert len(c.post("/api/find", json=dict(body, area=_map)).get_json()["results"]) == 1                      # on the map
+assert c.post("/api/find", json=dict(body, area=_far)).get_json()["results"] == []                          # a different place
+assert c.post("/api/find", json=dict(body, exclude=[_map])).get_json()["results"] == []                     # the rest of NZ skips the map
+assert len(c.post("/api/find", json=dict(body, area=_map, exclude=[_far])).get_json()["results"]) == 1
 nzl = wb._cache[r["results"][0]["osm_id"]]
 assert nzl["recipe"]["authority"] == "Auckland Council" and nzl["recipe"]["bbox"] == [-48.0, 166.0, -34.0, 179.5], nzl["recipe"]
 wb.seed_set(conn, "store_osm", "done")

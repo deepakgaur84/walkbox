@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS store (
     s REAL, w REAL, n REAL, e REAL, light TEXT NOT NULL, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS store_src ON store(source, s, n);
+CREATE INDEX IF NOT EXISTS store_name ON store(name);      -- lets a name search read just the names, not every saved route line
 CREATE TABLE IF NOT EXISTS poi (
     id INTEGER PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL,
     name TEXT, hours TEXT, website TEXT
@@ -3068,7 +3069,20 @@ def _like_where(tokens, fields):
     return " AND ".join("(%s)" % " OR ".join("UPPER(%s) LIKE '%%%s%%'" % (f, _esc_sql(tok.upper())) for f in fields) for tok in tokens)
 
 
-def find_by_name(tokens, sources):
+def _area(v):
+    """[south, west, north, east] from a request, or None."""
+    try:
+        a = [float(x) for x in v]
+        return a if len(a) == 4 and a[0] <= a[2] and a[1] <= a[3] else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _inside(wk, a):
+    return wk.get("lat") is not None and wk.get("lon") is not None and a[0] <= wk["lat"] <= a[2] and a[1] <= wk["lon"] <= a[3]
+
+
+def find_by_name(tokens, sources, area=None, exclude=()):
     """Walks whose name holds every word, from the stored download where there is one and live from DOC / the national tracks otherwise."""
     walks, problems, notes = [], [], []
     conn = db()
@@ -3083,8 +3097,13 @@ def find_by_name(tokens, sources):
         kinds.append("osm-path")
     if kinds:
         like = " AND ".join("name LIKE ?" for _ in tokens)
-        rows = conn.execute("SELECT light FROM store WHERE source IN (%s) AND %s LIMIT ?" % (",".join("?" * len(kinds)), like),
-                            kinds + ["%" + tok + "%" for tok in tokens] + [FIND_LIMIT * 3]).fetchall()
+        # the inner query walks the name index only (a few MB); the full rows are fetched just for the matches
+        box, bargs = "", []
+        if area:                                       # only walks whose outline touches this area
+            box, bargs = " AND n >= ? AND s <= ? AND e >= ? AND w <= ?", [area[0], area[2], area[1], area[3]]
+        rows = conn.execute("SELECT light FROM store WHERE osm_id IN (SELECT osm_id FROM store INDEXED BY store_name WHERE %s) "
+                            "AND source IN (%s)%s LIMIT ?" % (like, ",".join("?" * len(kinds)), box),
+                            ["%" + tok + "%" for tok in tokens] + kinds + bargs + [FIND_LIMIT * 3]).fetchall()
         walks += [json.loads(r["light"]) for r in rows]
     if ("routes" in sources or "paths" in sources) and not conn.execute("SELECT 1 FROM seed_cells WHERE item='store_osm' LIMIT 1").fetchone():
         notes.append("OpenStreetMap walks can be searched by name once their download on the Data tab has finished.")   # never built yet; a monthly renewal keeps the old walks searchable
@@ -3109,6 +3128,8 @@ def find_by_name(tokens, sources):
     seen, out = set(), []
     for wk in prefer_curated(walks):
         if wk["osm_id"] not in seen and all(tok in wk["name"].lower() for tok in tokens):
+            if (area and not _inside(wk, area)) or any(_inside(wk, x) for x in exclude):
+                continue                               # belongs to another stage of the search (map, Auckland, rest of NZ)
             seen.add(wk["osm_id"])
             out.append(wk)
     q = " ".join(tokens)
@@ -3129,8 +3150,10 @@ def api_find():
     if not sources:
         return jsonify(error="Choose at least one source"), 400
     t0 = time.time()
-    walks, problems, notes = find_by_name(tokens, sources)
-    if not walks and problems:
+    area = _area(b.get("area"))
+    exclude = [a for a in (_area(x) for x in (b.get("exclude") or [])[:3]) if a]
+    walks, problems, notes = find_by_name(tokens, sources, area, exclude)
+    if not walks and problems and not area:
         return jsonify(error="Could not search: " + " | ".join(problems)), 502
     have = {r["osm_id"] for r in db().execute("SELECT osm_id FROM walks")}
     return jsonify(results=[public(wk, wk["osm_id"] in have) for wk in walks], warnings=problems, notes=notes,

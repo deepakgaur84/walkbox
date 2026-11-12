@@ -801,18 +801,30 @@ async function runNameSearch() {
   if (searchCtl) searchCtl.abort();
   searchCtl = new AbortController();
   const mine = ++searchSeq, btn = $('searchBtn'), signal = searchCtl.signal;
-  btn.textContent = 'Searching all NZ… (press again to restart)';
+  btn.textContent = 'Searching… (press again to restart)';
   origin = null; results = []; selected.clear(); render();
   status('Searching all of New Zealand for “' + q + '”…');
+  // Looks in three steps so the nearest walks appear first: what is on the map, then Auckland, then the rest of NZ.
+  const mb = map.getBounds(), MAPBOX = [mb.getSouth(), mb.getWest(), mb.getNorth(), mb.getEast()];
+  const AUCKLAND = [-37.45, 174.2, -36.0, 175.6];
+  const stages = [['on the map', MAPBOX, []], ['Auckland', AUCKLAND, [MAPBOX]], ['the rest of New Zealand', null, [MAPBOX, AUCKLAND]]];
+  const notes = []; let capped = false;
   try {
-    const j = await post('/api/find', {q, sources}, signal);
-    if (mine !== searchSeq) return;
-    results = j.results; render(true);
-    $('findActions').style.display = results.length ? '' : 'none';
-    const notes = (j.notes || []).concat(j.warnings || []);
-    status((results.length ? 'Matches for “' + q + '” anywhere in NZ' + (j.capped ? ' (list capped, type more of the name)' : '') + '. Tap a walk to see its route.'
-                            : 'No walk has “' + q + '” in its name.') + (notes.length ? ' ' + notes.join(' | ') : ''), !results.length && !!(j.warnings || []).length);
-    const first = results.find(r => r.lat != null && r.lon != null); if (first) map.setView([first.lat, first.lon], 12, {animate: false});
+    for (const [label, area, exclude] of stages) {
+      status('Searching ' + label + ' for “' + q + '”…' + (results.length ? ' ' + results.length + ' found so far.' : ''));
+      const j = await post('/api/find', {q, sources, area, exclude}, signal);
+      if (mine !== searchSeq) return;
+      const have = new Set(results.map(r => r.osm_id));
+      results = results.concat(j.results.filter(r => !have.has(r.osm_id)));
+      render(true);
+      $('findActions').style.display = results.length ? '' : 'none';
+      (j.notes || []).concat(j.warnings || []).forEach(n => { if (!notes.includes(n)) notes.push(n); });
+      capped = capped || !!j.capped;
+    }
+    status((results.length ? 'Matches for “' + q + '”: on the map first, then Auckland, then the rest of NZ' + (capped ? ' (list capped, type more of the name)' : '') + '. Tap a walk to see its route.'
+                            : 'No walk has “' + q + '” in its name.') + (notes.length ? ' ' + notes.join(' | ') : ''), !results.length && !!notes.length);
+    const inMap = results.some(r => r.lat != null && MAPBOX[0] <= r.lat && r.lat <= MAPBOX[2] && MAPBOX[1] <= r.lon && r.lon <= MAPBOX[3]);
+    const first = results.find(r => r.lat != null && r.lon != null); if (first && !inMap) map.setView([first.lat, first.lon], 12, {animate: false});
   } catch (e) {
     if (e.name === 'AbortError' || mine !== searchSeq) return;
     status(e.message, true);
