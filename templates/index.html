@@ -57,6 +57,10 @@
   #editor .tools3 { display:flex; gap:4px; margin:6px 0; }
   #editor .tools3 button { flex:1; border:1px solid var(--line); background:#fff; border-radius:8px; padding:5px 2px; cursor:pointer; font-size:13px; }
   #editor .tools3 button.on { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:600; }
+  .grabbing-route { cursor:grab !important; }
+  #edmenu { position:absolute; z-index:1200; background:#fff; border-radius:10px; box-shadow:0 2px 12px rgba(0,0,0,.4); padding:4px; min-width:170px; }
+  #edmenu button { display:block; width:100%; text-align:left; border:0; background:none; padding:9px 12px; font-size:14px; cursor:pointer; border-radius:6px; }
+  #edmenu button:hover { background:var(--brand2); }
   #editor .hint { color:var(--mute); font-size:12px; margin:2px 0 6px; }
   #editor .row { display:flex; gap:4px; flex-wrap:wrap; margin:6px 0; }
   #editor .row button { border:1px solid var(--line); background:#fff; border-radius:8px; padding:4px 9px; cursor:pointer; font-size:12px; }
@@ -1138,7 +1142,7 @@ async function edLeg(a, b) {                     // the path between two points:
   } catch (e) { ed.notice = 'Could not follow paths (' + e.message + '). A straight line was used.'; return straight; }
 }
 function edMapClick(e) {
-  if (!ed || ed.dialog || ed.tool === 'trim') return;
+  if (!ed || ed.dialog || ed.tool === 'trim' || ed.suppressClick) return;
   const P = {lat: e.latlng.lat, lon: e.latlng.lng, split: false};
   edDo(async () => {
     if (ed.tool === 'draw') {                    // extend the route from its last point
@@ -1166,13 +1170,113 @@ function edMapClick(e) {
     ed.wps.splice(i + 1, 0, ...newWps); ed.legs.splice(i, 1, ...newLegs);
   });
 }
-function edMove(i, ll) {
+async function edLegRaw(a, b) {                  // like edLeg, but the ends are left where the path really is (so the point snaps onto it)
+  const straight = [[a.lat, a.lon], [b.lat, b.lon]];
+  if (!ed.snap || !ROUTING) return straight;
+  try {
+    const resp = await fetch('/api/route', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: 'leg', from: [a.lat, a.lon], to: [b.lat, b.lon]})});
+    const j = await resp.json().catch(() => ({}));
+    if (!resp.ok || !j.shape || j.shape.length < 2) throw new Error(j.error || ('routing failed (' + resp.status + ')'));
+    ed.notice = ''; return j.shape.map(p => [p[0], p[1]]);
+  } catch (e) { ed.notice = 'Could not follow paths (' + e.message + '). A straight line was used.'; return straight; }
+}
+async function edMoveCore(i, ll) {               // move point i to ll, snapped onto the nearest path, and re-route the legs either side
+  let P = {lat: ll.lat, lon: ll.lng, split: false};
+  const prev = i > 0 ? ed.wps[i - 1] : null, next = i < ed.wps.length - 1 ? ed.wps[i + 1] : null;
+  let left = null, right = null;
+  if (prev) { left = await edLegRaw(prev, P); const e = left[left.length - 1]; P = {lat: e[0], lon: e[1], split: false}; left[0] = [prev.lat, prev.lon]; }
+  if (next) { right = await edLegRaw(P, next); if (!prev) { const st = right[0]; P = {lat: st[0], lon: st[1], split: false}; } right[right.length - 1] = [next.lat, next.lon]; }
+  if (left) left[left.length - 1] = [P.lat, P.lon];
+  if (right) right[0] = [P.lat, P.lon];
+  if (left) ed.legs[i - 1] = left; if (right) ed.legs[i] = right; ed.wps[i] = P;
+}
+function edMove(i, ll) { edDo(async () => { edSnap(); await edMoveCore(i, ll); }); }
+
+// Drag the route itself (like in a map app): grab it anywhere, pull, and it bends there, following the paths
+function edTol(lat) { return Math.max(6, 12 * 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, map.getZoom())); }   // 12 screen pixels, in metres
+function edOnRoute(ll) {
+  if (!ed || ed.dialog || ed.tool !== 'reshape' || !ed.legs.length) return null;
+  const near = nearestLeg(ed.legs, ll.lat, ll.lng);
+  return near.index >= 0 && near.off <= edTol(ll.lat) ? near : null;
+}
+function edHover(ev) {                           // a small handle shows where the route can be grabbed
+  if (!ed || ed.drag) return;
+  const near = ev ? edOnRoute(map.mouseEventToLatLng(ev)) : null, cont = map.getContainer();
+  if (!near) { if (ed && ed.hoverMk) { ed.layer.removeLayer(ed.hoverMk); ed.hoverMk = null; } cont.classList.remove('grabbing-route'); return; }
+  const ll = map.mouseEventToLatLng(ev), sp = splitLegAt(ed.legs[near.index], ll.lat, ll.lng), at = sp ? sp.at : null;
+  if (!at) return;
+  if (!ed.hoverMk) ed.hoverMk = L.circleMarker(at, {radius: 7, color: '#1b5e20', weight: 3, fillColor: '#fff', fillOpacity: 1, interactive: false}).addTo(ed.layer);
+  else ed.hoverMk.setLatLng(at);
+  cont.classList.add('grabbing-route');
+}
+function edDragStart(ev) {
+  if (!ed || ed.dialog || ed.tool !== 'reshape' || ed.busy || (ev.pointerType === 'mouse' && ev.button !== 0)) return;
+  if (ev.target.closest('.leaflet-marker-icon, .leaflet-control, .leaflet-popup, #edmenu, #side, #chipbar, #mapctl, #editor, #elev')) return;
+  const ll = map.mouseEventToLatLng(ev), near = edOnRoute(ll); if (!near) return;
+  ev.stopPropagation(); ev.preventDefault();
+  map.dragging.disable();
+  const mk = L.marker(ll, {icon: L.divIcon({className: '', html: '<div class="wp"></div>', iconSize: [18, 18], iconAnchor: [9, 9]}), interactive: false, keyboard: false, zIndexOffset: 900}).addTo(ed.layer);
+  const a = ed.wps[near.index], b = ed.wps[near.index + 1];
+  const ghost = L.polyline([[a.lat, a.lon], ll, [b.lat, b.lon]], {color: '#1b5e20', weight: 5, opacity: .8, dashArray: '2 8', interactive: false}).addTo(ed.layer);
+  const d = ed.drag = {near, grab: ll, drop: ll, mk, ghost, a, b, moved: false, x: ev.clientX, y: ev.clientY};
+  if (ed.hoverMk) { ed.layer.removeLayer(ed.hoverMk); ed.hoverMk = null; }
+  const move = e => {
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) d.moved = true;
+    d.drop = map.mouseEventToLatLng(e); mk.setLatLng(d.drop); ghost.setLatLngs([[a.lat, a.lon], d.drop, [b.lat, b.lon]]);
+  };
+  const up = e => {
+    window.removeEventListener('pointermove', move, true); window.removeEventListener('pointerup', up, true); window.removeEventListener('pointercancel', up, true);
+    map.dragging.enable();
+    if (ed) { ed.layer.removeLayer(mk); ed.layer.removeLayer(ghost); }
+    if (!ed || ed.drag !== d) return;
+    ed.drag = null;
+    if (!d.moved) return;                         // just a click: the normal click handling takes over
+    ed.suppressClick = true; setTimeout(() => { if (ed) ed.suppressClick = false; }, 60);
+    edDo(async () => {
+      edSnap();
+      const i = d.near.index, sp = splitLegAt(ed.legs[i], d.grab.lat, d.grab.lng); let idx;
+      if (sp) { ed.wps.splice(i + 1, 0, {lat: sp.at[0], lon: sp.at[1], split: true}); ed.legs.splice(i, 1, sp.first, sp.second); idx = i + 1; }
+      else idx = havM([d.grab.lat, d.grab.lng], [a.lat, a.lon]) <= havM([d.grab.lat, d.grab.lng], [b.lat, b.lon]) ? i : i + 1;   // grabbed right at an end: move that point
+      await edMoveCore(idx, d.drop);
+    });
+  };
+  window.addEventListener('pointermove', move, true); window.addEventListener('pointerup', up, true); window.addEventListener('pointercancel', up, true);
+}
+map.getContainer().addEventListener('pointerdown', edDragStart, true);
+map.getContainer().addEventListener('pointermove', ev => { if (ed && ed.tool === 'reshape' && !ed.drag && !ev.buttons) { if (!ed.hov) ed.hov = requestAnimationFrame(() => { ed.hov = 0; edHover(ev); }); } });
+map.getContainer().addEventListener('pointerleave', () => { if (ed) edHover(null); });
+
+// Right-click (or press and hold on a phone) to choose where the walk starts or ends
+function edMenuClose() { const m = $('edmenu'); if (m) m.remove(); document.removeEventListener('pointerdown', edMenuAway, true); }
+function edMenuAway(ev) { if (!ev.target.closest('#edmenu')) edMenuClose(); }
+function edSetEnd(which, ll) {
   edDo(async () => {
-    edSnap(); const P = {lat: ll.lat, lon: ll.lng, split: false};
-    const left = i > 0 ? await edLeg(ed.wps[i - 1], P) : null, right = i < ed.wps.length - 1 ? await edLeg(P, ed.wps[i + 1]) : null;
-    if (left) ed.legs[i - 1] = left; if (right) ed.legs[i] = right; ed.wps[i] = P;
+    const P = {lat: ll.lat, lon: ll.lng, split: false};
+    if (which === 'end' && ed.wps.length === 0) { ed.notice = 'Choose the start first (right-click, Start here).'; return; }
+    edSnap();
+    if (ed.wps.length === 0) { ed.wps.push(P); return; }
+    if (ed.wps.length === 1) {
+      if (which === 'start') ed.wps[0] = P;
+      else { const leg = await edLegRaw(ed.wps[0], P); leg[0] = [ed.wps[0].lat, ed.wps[0].lon]; const e = leg[leg.length - 1]; ed.wps.push({lat: e[0], lon: e[1], split: false}); ed.legs.push(leg); }
+      return;
+    }
+    await edMoveCore(which === 'start' ? 0 : ed.wps.length - 1, ll);
   });
 }
+map.on('contextmenu', e => {
+  if (!ed || ed.dialog || ed.tool === 'trim') return;
+  edMenuClose();
+  const m = document.createElement('div'); m.id = 'edmenu';
+  const item = (text, fn) => { const b = document.createElement('button'); b.textContent = text; b.onclick = ev => { ev.stopPropagation(); edMenuClose(); fn(); }; m.appendChild(b); };
+  item('⚑ Start here', () => edSetEnd('start', e.latlng));
+  item('⚑ End here', () => edSetEnd('end', e.latlng));
+  if (ed.wps.length > 1) item('＋ Go via here (detour)', () => edMapClick({latlng: e.latlng}));
+  const pt = e.containerPoint, W = map.getSize();
+  m.style.left = Math.min(pt.x, W.x - 190) + 'px'; m.style.top = Math.min(pt.y, W.y - 110) + 'px';
+  $('mapwrap').appendChild(m);
+  setTimeout(() => document.addEventListener('pointerdown', edMenuAway, true), 0);
+});
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape') edMenuClose(); });
 function edRemove(i) {
   const n = ed.wps.length, interior = i > 0 && i < n - 1;
   if (!interior && ed.tool !== 'draw') return;     // the start and end can only be dragged (or removed in draw mode)
@@ -1200,7 +1304,7 @@ function edApplyTrim() {
 function setTool(t) {
   if (!ed) return; ed.tool = t; ed.trim = null;
   document.querySelectorAll('#editor .tools3 button').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
-  $('edhint').textContent = {reshape: 'Click the map to add a detour point (click on the route itself to just split it). Drag points to move them. Click a point to remove it.',
+  $('edhint').textContent = {reshape: 'Drag the route to bend it: it snaps to nearby paths. Right-click the map to set the start or end. Click the map to add a detour point; click a point to remove it.',
     draw: 'Click the map to add points to the end of the route. “Start over” clears the route first.',
     trim: 'Drag the two orange handles along the route to cut off the start or the end, then press Apply trim.'}[t];
   $('edapply').style.display = t === 'trim' ? '' : 'none';
@@ -1227,7 +1331,7 @@ function edStats() {
 function fmtMinutes(m) { return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min'; }
 function edRedraw() {
   if (!ed) return;
-  ed.layer.clearLayers();
+  ed.layer.clearLayers(); ed.hoverMk = null;
   const chain = edChain(); ed.chain = chain; ed.cum = chain.length > 1 ? cumDist(chain) : [0];
   const add = l => { l.addTo(ed.layer); return l; };
   if (ed.orig.length > 1) add(L.polyline(ed.orig, {color: '#888', weight: 3, opacity: .9, dashArray: '6 8', interactive: false}));   // the original, for reference
