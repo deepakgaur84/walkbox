@@ -1598,7 +1598,8 @@ function loadInfo(s) {
     .then(w => { if (sel === s) { wbox.textContent = ''; wbox.className = ''; renderWeather(wbox, w); } })
     .catch(e => { if (sel === s) wbox.textContent = e.message; });
   cachedGet('/api/walks/' + s.r.osm_id + '/places')
-    .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, s.r.reversed ? reversePlaces(d) : d); } })
+    .then(d => { if (sel === s) { pbox.textContent = ''; pbox.className = ''; renderPlaces(pbox, s, s.r.reversed ? reversePlaces(d) : d);
+      if (d.from) pbox.appendChild(mk('div', 'cap', d.from === 'store' ? 'Places from Walkbox’s own NZ store.' : 'Places from the live OpenStreetMap servers: the store has no places yet (rebuild it on the Data tab) or this walk is outside NZ.')); } })
     .catch(e => { if (sel === s) pbox.textContent = e.message; });
 }
 function elevFloat(on) {                                // while editing, the profile floats over the map again

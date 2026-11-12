@@ -1524,13 +1524,48 @@ def along_and_off(lat, lon, chain, cum):
     return best_along, best_off
 
 
+def nearest_finder(chain, cum, reach_m):
+    """A fast version of along_and_off for many points that only care about those within reach_m of the route:
+    the route is cut into short stretches with a padded box each, so a point is only measured against stretches near it."""
+    pad_y = reach_m / 110540.0
+    stretches, step = [], 8
+    for i in range(0, len(chain) - 1, step):
+        part = chain[i:i + step + 1]
+        la = [p[0] for p in part]; lo = [p[1] for p in part]
+        pad_x = reach_m / (math.cos(math.radians(la[0])) * 111320.0)
+        stretches.append((min(la) - pad_y, max(la) + pad_y, min(lo) - pad_x, max(lo) + pad_x, i, min(i + step + 1, len(chain))))
+
+    def find(lat, lon):
+        best_off, best_along = float("inf"), 0.0
+        kx, ky = math.cos(math.radians(lat)) * 111320.0, 110540.0
+        for la0, la1, lo0, lo1, a, b in stretches:
+            if lat < la0 or lat > la1 or lon < lo0 or lon > lo1:
+                continue
+            for i in range(a, b - 1):
+                ax, ay = (chain[i][1] - lon) * kx, (chain[i][0] - lat) * ky
+                bx, by = (chain[i + 1][1] - lon) * kx, (chain[i + 1][0] - lat) * ky
+                dx, dy = bx - ax, by - ay
+                l2 = dx * dx + dy * dy
+                t = max(0.0, min(1.0, -(ax * dx + ay * dy) / l2)) if l2 else 0.0
+                off = math.hypot(ax + t * dx, ay + t * dy)
+                if off < best_off:
+                    best_off, best_along = off, cum[i] + t * (cum[i + 1] - cum[i])
+        return best_along, best_off
+    return find
+
+
+def poi_saved():
+    try:
+        return db().execute("SELECT 1 FROM poi LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def places_local_ok(s_, w_, n_, e_):
     """True when the places read from the NZ file are saved and the walk lies inside New Zealand."""
     if not (NZ_BOX[0] <= s_ and n_ <= NZ_BOX[1] and NZ_BOX[2] <= w_ and e_ <= NZ_BOX[3]):
         return False
-    try:
-        if seed_status(db(), "store_osm") != "done":
-            return False
+    try:                                                  # the saved places stay valid while a monthly rebuild runs
         return db().execute("SELECT 1 FROM poi LIMIT 1").fetchone() is not None
     except sqlite3.Error:
         return False
@@ -1572,10 +1607,11 @@ def fetch_places(chain):
     local = places_local_ok(s_, w_, n_, e_)
     cands = _places_local(s_, w_, n_, e_) if local else _places_overpass("(%f,%f,%f,%f)" % (s_, w_, n_, e_))
     out, seen = [], set()
+    near = nearest_finder(ch, cum, max(v[2] for v in PLACE_KINDS.values()))
     for key, kind, label, name, lat, lon, hours, website in cands:
         if lat is None or lon is None:
             continue
-        along, off = along_and_off(lat, lon, ch, cum)
+        along, off = near(lat, lon)
         if off > PLACE_KINDS[kind][2]:
             continue
         if key in seen:
@@ -1592,7 +1628,7 @@ def fetch_places(chain):
         if per_kind[pl["kind"]] <= 40:
             trimmed.append(pl)
     counts = {k: sum(1 for x in out if x["kind"] == k) for k in PLACE_KINDS}
-    return {"places": trimmed, "counts": counts, "total_km": round(total_km, 2),
+    return {"places": trimmed, "counts": counts, "total_km": round(total_km, 2), "from": "store" if local else "live",
             "kinds": {k: {"label": v[0], "icon": v[1]} for k, v in PLACE_KINDS.items()}}
 
 
@@ -1611,7 +1647,8 @@ def api_places(osm_id):
         res = fetch_places(chain)
     except Exception as ex:
         app.logger.warning("places lookup failed: %r", ex)
-        return jsonify(error="Nearby places unavailable: %s" % (ex if isinstance(ex, RuntimeError) else "unexpected answer from the map server")), 502
+        hint = "" if poi_saved() else " Walkbox's own places are not saved yet: rebuild the OpenStreetMap store on the Data tab to make this instant."
+        return jsonify(error="Nearby places unavailable: %s.%s" % (ex if isinstance(ex, RuntimeError) else "unexpected answer from the map server", hint)), 502
     kv_put("places", "%s:%s" % (osm_id, len(chain)), res)
     return jsonify(res)
 
